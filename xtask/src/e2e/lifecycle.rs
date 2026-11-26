@@ -63,10 +63,19 @@ pub fn run(env: &mut CellEnv, cell: &Cell, journey: Lifecycle, checks: &mut Chec
   // Also mark the host process argv, so existing leftover detection can
   // report and reclaim this owned child if the product fails its stop.
   actor["env"] = json!({ "E2E_LIFECYCLE_MARKER": workspace });
+  // The routed `python3` runs in the actor's working directory, which is
+  // its workspace (`~/workspace`), mapped by the workspace's path_map entry.
+  // Without `actor.workspace` the default workspace is the folder `run
+  // create` runs in, the cell directory, and since routing maps a path by
+  // its longest key (#123) that entry wins over a `~` entry: the heartbeat
+  // landed at the cell root, not in `lifecycle-native/`. The workspace is
+  // this cell's native folder instead, so the routed command writes where
+  // the cell watches, and the profile keeps to the workspace's own entry.
+  actor["workspace"] = json!({ "path": "~/workspace", "from": format!("executor:work:{}", workspace.display()), "writable": true });
   let profile = env.profile(&json!({
     "user": { "name": name, "uid": uid, "gid": uid },
     "actor": actor,
-    "executors": { "work": { "driver": "native", "workspace": workspace, "path_map": { "~": workspace } } },
+    "executors": { "work": { "driver": "native", "workspace": workspace } },
     "commands": [{ "match": "python3 **", "to": "work" }],
   }))?;
   let id = runs::create(env, &profile, &["-t"])?;

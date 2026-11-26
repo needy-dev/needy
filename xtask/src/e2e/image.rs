@@ -2,9 +2,12 @@
 //! `image edit` (with lockfile commit and `run:` snippet), and `image rollback`
 //! on VM and container drivers.
 
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
+use serde::Deserialize;
 use serde_json::json;
 
 use super::checks::Checks;
@@ -21,6 +24,32 @@ const STEP: Duration = Duration::from_secs(120);
 fn snapshot_tag(digest: &str) -> Option<String> {
   let hex = digest.strip_prefix("sha256:")?;
   (!hex.is_empty()).then(|| format!("needy-snapshot:{hex}"))
+}
+
+/// The built-in feature every image build pins without the image naming it.
+// Source: `crates/core/src/image/mod.rs`, `BUILTIN_SSHFS`.
+const IMPLICIT_FEATURE: &str = "builtin:sshfs";
+
+/// What the harness reads of an image's `<image>.lock`.
+// Source: `crates/cli/src/commands/image/lockfile.rs`, `Lockfile` (the CLI
+// owns the file; unknown keys fail here too, so a format change shows).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Lock {
+  #[serde(default)]
+  commit: Option<serde_yaml::Value>,
+  #[serde(default)]
+  features: BTreeMap<String, String>,
+}
+
+/// `path` parsed, or an empty lock when the CLI removed the file (it does
+/// when nothing is left to record).
+fn read_lock(path: &Path) -> Result<Lock> {
+  match std::fs::read_to_string(path) {
+    Ok(text) => serde_yaml::from_str(&text).with_context(|| format!("cannot parse {}: {text}", path.display())),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Lock::default()),
+    Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+  }
 }
 
 /// Removes `needy-snapshot:<hex>` container images materialized during an
@@ -188,10 +217,22 @@ exit 0
     format!("before={built_snapshot}, after={edited_snapshot}"),
   );
 
-  // 5. Roll back the commit and verify the lockfile is cleared.
+  // 5. Roll back the commit and verify the lockfile no longer records it.
+  // NOTICE: rollback removes the commit, not the feature pins. A
+  // `linux-container` build pins the implicit `builtin:sshfs` (since #47 and
+  // #51), so its lockfile stays with that pin; a VM build pins none, and the
+  // CLI removes the then-empty file. This test image names no feature, so
+  // the implicit pin is the only one that may remain, unchanged.
+  let pinned = read_lock(&lockfile)?.features;
   let rolled = env.needy(&["image", "rollback", "--profile", &profile_str], STEP)?;
   checks.check("image rollback succeeds", rolled.ok(), rolled.brief());
-  checks.check("image rollback clears the lockfile", !lockfile.exists(), format!("{} still exists", lockfile.display()));
+  let lock = read_lock(&lockfile)?;
+  checks.check("image rollback removes the commit from the lockfile", lock.commit.is_none(), format!("{lock:?}"));
+  checks.check(
+    "image rollback keeps only the implicit feature pins, unchanged",
+    lock.features.keys().all(|feature| feature == IMPLICIT_FEATURE) && lock.features == pinned,
+    format!("before={pinned:?}, after={:?}", lock.features),
+  );
 
   // 6. Third run: committed edit is gone, declared `run:` layer remains.
   let run3 = runs::create(env, &profile, &[])?;
@@ -300,5 +341,21 @@ mod tests {
     assert_eq!(snapshot_tag("sha256:0123456789abcdef"), Some("needy-snapshot:0123456789abcdef".to_string()));
     assert_eq!(snapshot_tag("sha256:"), None);
     assert_eq!(snapshot_tag("not-a-digest"), None);
+  }
+
+  #[test]
+  fn read_lock_reads_a_feature_pin_without_a_commit_and_a_missing_file_as_empty() {
+    let dir = std::env::temp_dir().join(format!("xtask-lock-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("image.yaml.lock");
+    // The shape the CLI writes after a rollback of a `linux-container` build.
+    std::fs::write(&path, "# Managed by needy. Do not edit by hand.\nfeatures:\n  builtin:sshfs: sha256:0123\n").unwrap();
+    let lock = read_lock(&path).unwrap();
+    assert!(lock.commit.is_none());
+    assert_eq!(lock.features.keys().collect::<Vec<_>>(), [IMPLICIT_FEATURE]);
+    std::fs::write(&path, "commit:\n  layer: sha256:01\n  base: sha256:02\n").unwrap();
+    assert!(read_lock(&path).unwrap().commit.is_some());
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(read_lock(&path).unwrap().commit.is_none());
   }
 }

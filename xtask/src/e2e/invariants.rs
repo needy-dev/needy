@@ -2,7 +2,7 @@
 //! nothing left behind once its daemon stopped (containers, VMs, processes,
 //! mounts, sockets).
 
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::time::Duration;
 
@@ -65,8 +65,34 @@ pub fn discovery(env: &CellEnv, checks: &mut Checks) {
   );
 }
 
+/// The device of `root`, for [`crosses_mount`]; `None` when it cannot be
+/// read, and then no directory is taken to cross.
+pub(super) fn device(root: &Path) -> Option<u64> {
+  std::fs::symlink_metadata(root).ok().map(|meta| meta.dev())
+}
+
+/// Whether the directory `path` is on another file system than the walk's
+/// root, whose device is `root`: a mount point the walk must not enter.
+// NOTICE: the sshfs default workspace of a run created in the cell directory
+// is mounted at `s/runs/<id>/mounts/0`, inside the very directory it mounts,
+// so a walk that enters it finds the cell again, without end (seen
+// 2026-11-26 on v0.0.20; the mount itself awaits an owner decision). The
+// harness's walks stay on the cell's file system, which also keeps them out
+// of any other mount a run leaves. The guard can stay once that product bug
+// is decided: a walk of the cell has no reason to enter a mount.
+pub(super) fn crosses_mount(path: &Path, root: Option<u64>) -> bool {
+  match (root, std::fs::symlink_metadata(path)) {
+    (Some(root), Ok(meta)) => meta.dev() != root,
+    // A mount point that cannot be read (a FUSE server that is gone answers
+    // `ENOTCONN`) is not entered either.
+    (Some(_), Err(_)) => true,
+    (None, _) => false,
+  }
+}
+
 fn find_sockets(dir: &Path) -> Vec<std::path::PathBuf> {
   let mut found = Vec::new();
+  let root = device(dir);
   let mut stack = vec![dir.to_path_buf()];
   while let Some(dir) = stack.pop() {
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -77,6 +103,9 @@ fn find_sockets(dir: &Path) -> Vec<std::path::PathBuf> {
         continue;
       };
       if kind.is_dir() {
+        if crosses_mount(&entry.path(), root) {
+          continue;
+        }
         stack.push(entry.path());
       } else if kind.is_socket() {
         found.push(entry.path());

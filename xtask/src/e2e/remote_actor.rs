@@ -99,6 +99,32 @@ impl Drop for ChildGuard {
   }
 }
 
+/// The static runner manifest (`--runners-file`) naming the executor runner
+/// and the ephemeral actor runner, with their credentials, roles and labels.
+// NOTICE: serialized rather than written as text: a `format!` string with
+// `\` line continuations strips each next line's indentation, which left
+// the list flat and the daemon refusing the file ("did not find expected
+// key", seen 2026-11-26 on v0.0.20).
+fn runners_yaml() -> Result<String> {
+  let manifest = json!({
+    "runners": [
+      {
+        "name": EXEC_RUNNER_NAME,
+        "credential": EXEC_RUNNER_TOKEN,
+        "roles": ["executor"],
+        "labels": { "role": "exec-e2e" },
+      },
+      {
+        "name": ACTOR_RUNNER_NAME,
+        "credential": ACTOR_RUNNER_TOKEN,
+        "roles": ["actor"],
+        "labels": { "role": "actor-e2e" },
+      },
+    ],
+  });
+  serde_yaml::to_string(&manifest).context("cannot serialize the static runner manifest")
+}
+
 pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
   let ctrl_port = super::transport::free_port()?;
   let gw_port = super::transport::free_port()?;
@@ -108,21 +134,7 @@ pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
 
   // Static runner manifest loaded by Process 1 via `--runners-file` for both
   // the executor runner and the ephemeral actor runner.
-  let runners_yaml = format!(
-    "runners:\n\
-       - name: {EXEC_RUNNER_NAME}\n\
-         credential: \"{EXEC_RUNNER_TOKEN}\"\n\
-         roles:\n\
-           - executor\n\
-         labels:\n\
-           role: exec-e2e\n\
-       - name: {ACTOR_RUNNER_NAME}\n\
-         credential: \"{ACTOR_RUNNER_TOKEN}\"\n\
-         roles:\n\
-           - actor\n\
-         labels:\n\
-           role: actor-e2e\n"
-  );
+  let runners_yaml = runners_yaml()?;
   let runners_file = env.file("static-runners.yaml", &runners_yaml, 0o600)?;
 
   // Activity hook script invoked asynchronously by Process 2 on routed exec/SFTP.
@@ -437,4 +449,32 @@ fn get_run(runtime_dir: &Path, run_id: &str) -> Result<needy_api_client::proto::
       .into_inner();
     resp.run.context("GetRun returned no run")
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::{Value, json};
+
+  use super::*;
+
+  // ROOT CAUSE:
+  //
+  // If the manifest was written with `\` line continuations, the YAML was
+  // flat because a continuation strips the next line's leading whitespace.
+  //
+  // Before the fix, the daemon refused the file at the second runner's
+  // `- name:`. The fix keeps a manifest that parses back to both runners.
+  #[test]
+  fn the_static_runner_manifest_parses_to_both_runners() {
+    let parsed: Value = serde_yaml::from_str(&runners_yaml().unwrap()).unwrap();
+    assert_eq!(
+      parsed,
+      json!({
+        "runners": [
+          { "name": EXEC_RUNNER_NAME, "credential": EXEC_RUNNER_TOKEN, "roles": ["executor"], "labels": { "role": "exec-e2e" } },
+          { "name": ACTOR_RUNNER_NAME, "credential": ACTOR_RUNNER_TOKEN, "roles": ["actor"], "labels": { "role": "actor-e2e" } },
+        ],
+      })
+    );
+  }
 }
