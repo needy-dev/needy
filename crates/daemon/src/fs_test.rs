@@ -714,3 +714,493 @@ chaos:
   assert_eq!(injected[0].target, "/workspace/moved.txt");
   assert_eq!(injected[0].effect.delay, Some(Duration::from_millis(50)));
 }
+
+#[tokio::test]
+async fn executor_server_serves_fs_session_roundtrip() {
+  use std::sync::Arc;
+
+  use needy_api_server::control::Caller;
+  use needy_api_server::{Health, Listen, Server};
+  use needy_core_executor::process::Host;
+  use needy_core_executor::service::ExecutorService;
+  use tokio_util::sync::CancellationToken;
+  use tokio_util::task::TaskTracker;
+
+  let dir = tempfile::Builder::new().prefix("exec-fs-").tempdir_in("/tmp").unwrap();
+  let socket = dir.path().join("executor.sock");
+  let workspace = tempfile::tempdir().unwrap();
+  std::fs::write(workspace.path().join("seed.txt"), b"from executor").unwrap();
+
+  let tasks = TaskTracker::new();
+  let cancel = CancellationToken::new();
+  let service = ExecutorService {
+    host: Host::default(),
+    name: "container-exec".into(),
+  };
+  let bound = Server::new(
+    Health {
+      instance_id: "exec-fs-test".into(),
+      role: "executor",
+    },
+    Caller::Operator,
+  )
+  .process_service(service)
+  .fs(Arc::new(crate::executor::ExecutorFs::new(tasks.clone(), cancel.clone())))
+  .bind(&[Listen::Unix(socket.clone())])
+  .await
+  .unwrap();
+  let stop = cancel.clone();
+  let served = tokio::spawn(async move { bound.serve(stop).await });
+
+  let client = needy_api_client::Client::connect(&format!("unix:{}", socket.display())).await.unwrap();
+  let (tx, mut rx) = client.fs_session().await.unwrap();
+
+  match rpc(
+    &tx,
+    &mut rx,
+    1,
+    session_request::Body::Mount(FsMount {
+      executor: "build".into(),
+      source: workspace.path().to_string_lossy().into_owned(),
+      target: "/workspace".into(),
+      writable: true,
+      lock_mode: FsLockMode::Local as i32,
+    }),
+  )
+  .await
+  {
+    session_response::Body::Mounted(m) => {
+      assert!(m.writable);
+      assert_eq!(m.root.unwrap().ino, ROOT_INO);
+    }
+    other => panic!("expected Mounted, got {other:?}"),
+  }
+
+  let seed_ino = match rpc(
+    &tx,
+    &mut rx,
+    2,
+    session_request::Body::Lookup(FsLookup {
+      parent: ROOT_INO,
+      name: "seed.txt".into(),
+    }),
+  )
+  .await
+  {
+    session_response::Body::Entry(e) => e.attr.unwrap().ino,
+    other => panic!("expected Entry, got {other:?}"),
+  };
+
+  let fh = match rpc(
+    &tx,
+    &mut rx,
+    3,
+    session_request::Body::Open(FsOpen {
+      ino: seed_ino,
+      flags: linux_flags::O_RDONLY,
+      writeback: false,
+    }),
+  )
+  .await
+  {
+    session_response::Body::Opened(o) => o.fh,
+    other => panic!("expected Opened, got {other:?}"),
+  };
+
+  match rpc(
+    &tx,
+    &mut rx,
+    4,
+    session_request::Body::Read(FsRead {
+      ino: seed_ino,
+      fh,
+      offset: 0,
+      size: 64,
+    }),
+  )
+  .await
+  {
+    session_response::Body::Data(d) => assert_eq!(d.data, b"from executor"),
+    other => panic!("expected Data, got {other:?}"),
+  }
+
+  match rpc(
+    &tx,
+    &mut rx,
+    5,
+    session_request::Body::Release(FsRelease {
+      ino: seed_ino,
+      fh,
+      lock_owner: 0,
+    }),
+  )
+  .await
+  {
+    session_response::Body::Ok(_) => {}
+    other => panic!("expected Ok, got {other:?}"),
+  }
+
+  drop(tx);
+  assert!(rx.message().await.unwrap().is_none());
+
+  cancel.cancel();
+  tasks.close();
+  tasks.wait().await;
+  served.await.unwrap().unwrap();
+}
+
+// ROOT CAUSE:
+//
+// If a run uses a `linux-container` executor, its workspace path (e.g.
+// `/workspace`) exists inside the executor container's mount namespace rather
+// than on the control host.
+//
+// Before the fix, `needy daemon executor` did not serve `FsService`, and
+// `Daemon::resolve_fs_target` fell back to local `HostFs::open(&mount.source)`
+// for any non-runner executor, failing with `ENOENT`.
+// The fix serves `FsService` on the executor server and forwards `FsService`
+// sessions for `linux-container` executors over the container's executor client.
+#[tokio::test]
+async fn linux_container_executor_fs_session_forwards_to_executor_server() {
+  use std::collections::HashMap;
+  use std::path::PathBuf;
+  use std::sync::{Arc, Mutex};
+
+  use futures_util::StreamExt as _;
+  use needy_api_server::control::{Caller, ControlError, FromRunner, Fs, Runs, StopMode, ToRunner};
+  use needy_api_server::{Health, Listen, Server};
+  use needy_core::types::Principal;
+  use needy_core_executor::driver::{LinuxContainer, Native, linux_container};
+  use needy_core_executor::engine::{self, testing::Fake};
+  use needy_core_executor::process::Host;
+  use needy_core_executor::service::ExecutorService;
+  use tokio_util::sync::CancellationToken;
+  use tokio_util::task::TaskTracker;
+
+  /// Stands in for the container's mount namespace: maps a container-only
+  /// path (`from`) that does not exist on the host to a real host `TempDir`
+  /// (`to`) before handing the stream to `ExecutorFs`.
+  struct ContainerNamespaceFs {
+    from: String,
+    to: PathBuf,
+    inner: crate::executor::ExecutorFs,
+  }
+
+  #[async_trait::async_trait]
+  impl Fs for ContainerNamespaceFs {
+    async fn session(&self, caller: Caller, requests: FromRunner<SessionRequest>) -> Result<ToRunner<SessionResponse>, ControlError> {
+      let from = self.from.clone();
+      let to = self.to.to_string_lossy().into_owned();
+      let mapped = requests.map(move |item| {
+        item.map(|mut req| {
+          if let Some(session_request::Body::Mount(ref mut mount)) = req.body
+            && mount.source == from
+          {
+            mount.source = to.clone();
+          }
+          req
+        })
+      });
+      self.inner.session(caller, Box::pin(mapped)).await
+    }
+  }
+
+  let container_path = "/needy-test-container-only-workspace";
+  assert!(!std::path::Path::new(container_path).exists(), "container-only path must not exist on host");
+
+  let container_ws = tempfile::tempdir().unwrap();
+  std::fs::write(container_ws.path().join("inside.txt"), b"inside container").unwrap();
+
+  type RunningExecutor = (CancellationToken, TaskTracker, tokio::task::JoinHandle<()>);
+  let running: Arc<Mutex<HashMap<String, RunningExecutor>>> = Arc::default();
+  let start_running = running.clone();
+  let remove_running = running.clone();
+  let ws_path = container_ws.path().to_path_buf();
+  let fake_engine = Arc::new(
+    Fake::new()
+      .with_stop_removes()
+      .with_wait_error(engine::Error::Refused("executor fixture only".into()))
+      .with_on_start(Arc::new(move |name, body| {
+        let running = start_running.clone();
+        let ws_path = ws_path.clone();
+        let name = name.to_string();
+        Box::pin(async move {
+          let body = body.unwrap();
+          let cmd = body.cmd.unwrap();
+          let endpoint = cmd.windows(2).find(|pair| pair[0] == "--listen").unwrap()[1].strip_prefix("unix:").unwrap();
+          let endpoint = std::path::Path::new(endpoint);
+          let target = endpoint.parent().unwrap().to_str().unwrap();
+          let binds = body.host_config.unwrap().binds.unwrap();
+          let source = binds
+            .iter()
+            .find_map(|bind| {
+              let (source, to) = bind.rsplit_once(':')?;
+              (to == target).then_some(source)
+            })
+            .unwrap();
+          let socket = PathBuf::from(source).join(endpoint.file_name().unwrap());
+          let tasks = TaskTracker::new();
+          let cancel = CancellationToken::new();
+          let service = ExecutorService {
+            host: Host::default(),
+            name: name.clone(),
+          };
+          let fs = Arc::new(ContainerNamespaceFs {
+            from: container_path.into(),
+            to: ws_path,
+            inner: crate::executor::ExecutorFs::new(tasks.clone(), cancel.clone()),
+          });
+          let bound = Server::new(
+            Health {
+              instance_id: name.clone(),
+              role: "executor",
+            },
+            Caller::Operator,
+          )
+          .process_service(service)
+          .fs(fs)
+          .bind(&[Listen::Unix(socket)])
+          .await
+          .map_err(|e| engine::Error::Refused(e.to_string()))?;
+          let stop = cancel.clone();
+          let served = tokio::spawn(async move {
+            let _ = bound.serve(stop).await;
+          });
+          running.lock().unwrap().insert(name, (cancel, tasks, served));
+          Ok(std::process::id())
+        })
+      }))
+      .with_on_remove(Arc::new(move |name| {
+        let running = remove_running.clone();
+        let name = name.to_string();
+        Box::pin(async move {
+          let entry = running.lock().unwrap().remove(&name);
+          if let Some((cancel, tasks, served)) = entry {
+            cancel.cancel();
+            tasks.close();
+            tasks.wait().await;
+            let _ = served.await;
+          }
+          Ok(())
+        })
+      })),
+  );
+
+  let dir = tempfile::Builder::new().prefix("fs-ctr-").tempdir_in("/tmp").unwrap();
+  let started = testing::daemon_in(dir, |_| {}).await;
+  let local_endpoint = format!("unix:{}", started.daemon.config.runtime_dir.join("local.sock").display());
+  let native = Arc::new(Native::new(needy_api_client::Client::connect(&local_endpoint).await.unwrap()));
+  let container = LinuxContainer::with_engine(
+    linux_container::Options {
+      image: started.daemon.config.executor_image.clone(),
+      state_dir: started.daemon.config.state_dir.clone(),
+      allow: Vec::new(),
+    },
+    fake_engine,
+  );
+  let links: Arc<crate::link::Links> = Arc::default();
+  let cancel = CancellationToken::new();
+  let daemon = crate::Daemon {
+    pool: Arc::new(crate::pool::Pool::new(native, Some(container), links.clone())),
+    runs: Arc::new(crate::run::Registry::new(started.daemon.state.clone())),
+    processes: Arc::default(),
+    links,
+    runner_hosts: Arc::default(),
+    tasks: TaskTracker::new(),
+    creates: TaskTracker::new(),
+    outside_runs: cancel.child_token(),
+    cancel,
+    shutting_down: Arc::default(),
+    suspending: Arc::default(),
+    runs_stopped: Arc::default(),
+    cleanup_incomplete: Arc::default(),
+    shutdown_started: Arc::default(),
+    ..started.daemon.clone()
+  };
+
+  let uid = unsafe { libc::geteuid() };
+  let gid = unsafe { libc::getegid() };
+  let profile = format!(
+    "actor: {{ driver: linux-firecracker }}\nuser: {{ name: user, uid: {uid}, gid: {gid} }}\nexecutors:\n  build: {{ driver: linux-container }}\ncommands:\n  - {{ match: '**', to: build }}\n"
+  );
+  let run_info = Runs::create(&daemon, testing::new_run(&profile, started.dir.path())).await.unwrap();
+
+  let control_socket = started.dir.path().join("control-fs.sock");
+  let control_bound = daemon.server(Some("secret".into())).bind(&[Listen::Unix(control_socket.clone())]).await.unwrap();
+  let actor_socket = started.dir.path().join("actor-fs.sock");
+  let actor_bound = Server::new(
+    Health {
+      instance_id: run_info.id.clone(),
+      role: "guest",
+    },
+    Caller::Actor {
+      run: run_info.id.clone(),
+    },
+  )
+  .fs(Arc::new(daemon.clone()))
+  .bind(&[Listen::Unix(actor_socket.clone())])
+  .await
+  .unwrap();
+  let server_stop = CancellationToken::new();
+  let _guard = server_stop.clone().drop_guard();
+  tokio::spawn(control_bound.serve(server_stop.clone()));
+  tokio::spawn(actor_bound.serve(server_stop));
+
+  // Verify both the run-scoped actor path (`run.executor("build")`) and the
+  // operator pool path (`pool.named("build")`) forward to the container's
+  // executor `FsService`.
+  let actor_client = needy_api_client::Client::connect(&format!("unix:{}", actor_socket.display())).await.unwrap();
+  let (tx, mut rx) = actor_client.fs_session().await.unwrap();
+
+  match rpc(
+    &tx,
+    &mut rx,
+    1,
+    session_request::Body::Mount(FsMount {
+      executor: "build".into(),
+      source: container_path.into(),
+      target: "/workspace".into(),
+      writable: true,
+      lock_mode: FsLockMode::Local as i32,
+    }),
+  )
+  .await
+  {
+    session_response::Body::Mounted(m) => {
+      assert!(m.writable);
+      assert_eq!(m.root.unwrap().ino, ROOT_INO);
+    }
+    other => panic!("expected Mounted from container executor, got {other:?}"),
+  }
+
+  let inside_ino = match rpc(
+    &tx,
+    &mut rx,
+    2,
+    session_request::Body::Lookup(FsLookup {
+      parent: ROOT_INO,
+      name: "inside.txt".into(),
+    }),
+  )
+  .await
+  {
+    session_response::Body::Entry(e) => e.attr.unwrap().ino,
+    other => panic!("expected Entry, got {other:?}"),
+  };
+
+  let fh = match rpc(
+    &tx,
+    &mut rx,
+    3,
+    session_request::Body::Open(FsOpen {
+      ino: inside_ino,
+      flags: linux_flags::O_RDONLY,
+      writeback: false,
+    }),
+  )
+  .await
+  {
+    session_response::Body::Opened(o) => o.fh,
+    other => panic!("expected Opened, got {other:?}"),
+  };
+
+  match rpc(
+    &tx,
+    &mut rx,
+    4,
+    session_request::Body::Read(FsRead {
+      ino: inside_ino,
+      fh,
+      offset: 0,
+      size: 64,
+    }),
+  )
+  .await
+  {
+    session_response::Body::Data(d) => assert_eq!(d.data, b"inside container"),
+    other => panic!("expected Data, got {other:?}"),
+  }
+
+  match rpc(
+    &tx,
+    &mut rx,
+    5,
+    session_request::Body::Release(FsRelease {
+      ino: inside_ino,
+      fh,
+      lock_owner: 0,
+    }),
+  )
+  .await
+  {
+    session_response::Body::Ok(_) => {}
+    other => panic!("expected Ok, got {other:?}"),
+  }
+
+  match rpc(
+    &tx,
+    &mut rx,
+    6,
+    session_request::Body::CreateAndWrite(FsCreateAndWrite {
+      parent: ROOT_INO,
+      name: "written.txt".into(),
+      mode: 0o644,
+      data: b"via container fs".to_vec(),
+    }),
+  )
+  .await
+  {
+    session_response::Body::Entry(e) => assert_eq!(e.attr.unwrap().size, 16),
+    other => panic!("expected Entry, got {other:?}"),
+  }
+  assert_eq!(std::fs::read(container_ws.path().join("written.txt")).unwrap(), b"via container fs");
+
+  match rpc(
+    &tx,
+    &mut rx,
+    7,
+    session_request::Body::Unlink(FsUnlink {
+      parent: ROOT_INO,
+      name: "written.txt".into(),
+    }),
+  )
+  .await
+  {
+    session_response::Body::Ok(_) => {}
+    other => panic!("expected Ok, got {other:?}"),
+  }
+  assert!(!container_ws.path().join("written.txt").exists());
+
+  drop(tx);
+  assert!(rx.message().await.unwrap().is_none());
+
+  // Also verify operator-level pool resolution (`pool.named("build")`).
+  let op_client =
+    needy_api_client::Client::connect(&format!("unix:{}", control_socket.display())).await.unwrap().with_token("secret").unwrap();
+  let (op_tx, mut op_rx) = op_client.fs_session().await.unwrap();
+  match rpc(
+    &op_tx,
+    &mut op_rx,
+    1,
+    session_request::Body::Mount(FsMount {
+      executor: "build".into(),
+      source: container_path.into(),
+      target: "/workspace".into(),
+      writable: false,
+      lock_mode: FsLockMode::Local as i32,
+    }),
+  )
+  .await
+  {
+    session_response::Body::Mounted(m) => {
+      assert!(!m.writable);
+      assert_eq!(m.root.unwrap().ino, ROOT_INO);
+    }
+    other => panic!("expected Mounted via pool.named, got {other:?}"),
+  }
+  drop(op_tx);
+  assert!(op_rx.message().await.unwrap().is_none());
+
+  Runs::stop(&daemon, &run_info.id, Principal::Operator, StopMode::Now).await.unwrap();
+  daemon.shutdown().await;
+}

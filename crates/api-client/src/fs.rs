@@ -8,7 +8,7 @@ use crate::{Client, Error, Result};
 
 // NOTICE: 64 requests in flight keep multiplexed FUSE operations ahead of the
 // network without unbounded buffering.
-const QUEUE: usize = 64;
+pub(crate) const QUEUE: usize = 64;
 
 /// Opens a bidirectional `FsService.Session` stream on `client`, carrying the
 /// client's bearer token, custom headers, and optional `x-needy-run-id`.
