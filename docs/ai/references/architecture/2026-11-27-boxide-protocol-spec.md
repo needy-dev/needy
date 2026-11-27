@@ -1,11 +1,11 @@
-# Sandbox protocol v1 (spec)
+# Boxide v1 (spec)
 
 Status: **proposed spec for owner review**, 2026-11-27. Nothing here is
-implemented. The protocol's name is *provisional*; "sandbox protocol" is a
-placeholder.
+implemented. The owner named the protocol **Boxide**, version **v1**, on
+2026-11-27 (package `boxide.v1`).
 
 The owner decided where this lives, on 2026-11-27: in this repository under
-`proto/sandbox/v1/`, as a package that names nothing of needy. Both sides are
+`proto/boxide/v1/`, as a package that names nothing of needy. Both sides are
 kept in sync by hand. It moves to its own repository once it is stable.
 
 Related:
@@ -54,14 +54,14 @@ v0.0.24).
 ## 3. Layers
 
 ```
-messages   sandbox.v1 protobuf: Frame, session, exec, fs   (the contract)
+messages   boxide.v1 protobuf:  Frame, session, exec, fs   (the contract)
 framing    Frame per logical stream, with credits             (the session)
 binding    gRPC bidi stream | WebSocket binary | stdio        (the transport)
 ```
 
 Every binding carries the same message, `Frame`:
 
-- **gRPC:** `service Sandbox { rpc Session(stream Frame) returns (stream Frame); }`;
+- **gRPC:** `service Boxide { rpc Session(stream Frame) returns (stream Frame); }`;
 - **WebSocket:** one binary message per `Frame`, at most 1 MiB;
 - **stdio:** a big-endian `uint32` length, then one `Frame`.
 
@@ -206,7 +206,7 @@ understand. Each side lists the keys it knows in `Hello` and `Welcome`, so
 neither depends on the other knowing a key.
 
 This is where today's needy-only fields go (`run_id`, `executor`, `runner`,
-`origin`, `search_path_if_missing` on `ExecStart`), keeping `sandbox.v1`
+`origin`, `search_path_if_missing` on `ExecStart`), keeping `boxide.v1`
 free of them.
 
 ## 9. Versioning and stability
@@ -216,14 +216,14 @@ free of them.
   several.
 - Messages and fields outside the frozen core are marked
   `// EXPERIMENTAL` in the proto and are not covered by the guarantee.
-- Buf's `FILE` breaking check runs on `proto/sandbox/` and must pass for a
+- Buf's `FILE` breaking check runs on `proto/boxide/` and must pass for a
   minor release.
 
 ## 10. Keeping two copies in sync (while it lives here)
 
-- `proto/sandbox/v1/` imports nothing from `proto/needy/`. needy maps its own
+- `proto/boxide/v1/` imports nothing from `proto/needy/`. needy maps its own
   messages onto it in code, never in the schema.
-- A constant `SANDBOX_PROTOCOL_VERSION` *(provisional)* in the schema's
+- A constant `BOXIDE_PROTOCOL_VERSION` *(provisional)* in the schema's
   options or a top-level comment changes on every edit. A copy elsewhere
   (for example a device agent's generated TypeScript) records the needy tag
   and the version it was generated from, and its CI compares them.
@@ -234,7 +234,7 @@ free of them.
 
 - A black-box suite drives a server through the stdio binding: core cases
   for every server, and capability cases only for what the server grants.
-- It lives in `xtask` at first (`cargo xtask sandbox-conformance --server
+- It lives in `xtask` at first (`cargo xtask boxide-conformance --server
   'CMD …'`, *provisional*) and moves with the protocol.
 - needy's runner is the first server to pass it; any other implementation
   (for example one in TypeScript) runs the same suite in its own CI.
@@ -245,13 +245,14 @@ free of them.
   binding. The broker spec carries the same frames over WebSockets.
 - needy's existing `RunnerService.Task`, `RunnerService.FsTask` and
   `FsService.Session` stay as they are until a slice migrates them to
-  `sandbox.v1`. The migration order is open question 3.
+  `boxide.v1`. The migration order is open question 3.
 
 ## 13. Open questions
 
-1. Name of the protocol and of the package (`sandbox.v1` is a placeholder).
+1. *Decided 2026-11-27:* the protocol is Boxide, and its first package is
+   `boxide.v1`.
 2. Whether to define a JSON mapping as well (debuggability vs. byte payloads).
-3. Migration: move needy's runner streams to `sandbox.v1` first, or add it
+3. Migration: move needy's runner streams to `boxide.v1` first, or add it
    only for brokered executors and converge later.
 4. Windows: which semantics a Windows server must provide to pass the core
    suite (POSIX rename over an open file is not available through

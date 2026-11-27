@@ -53,4 +53,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-26 | [Multi-host pass, v0.0.19 to v0.0.22](2026-11-26-multi-host-pass-evidence.md) | evidence |
 | 2026-11-27 | [An agent platform's execution mesh over needy (proposed design)](2026-11-27-agent-platform-execution-mesh-design.md) | design |
 | 2026-11-27 | [Dynamic executor binding and runner brokers (proposed spec)](2026-11-27-dynamic-executor-binding-and-brokers-spec.md) | spec |
-| 2026-11-27 | [Sandbox protocol v1 (proposed spec)](2026-11-27-sandbox-protocol-spec.md) | spec |
+| 2026-11-27 | [Boxide v1 (proposed spec)](2026-11-27-boxide-protocol-spec.md) | spec |

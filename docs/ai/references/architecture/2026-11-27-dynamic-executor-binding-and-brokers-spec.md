@@ -39,9 +39,9 @@ fit:
    run by authorized writers.
 3. **The daemon dials out to brokers.** A *broker* *(provisional)* is an
    outside service the daemon connects to. It offers runners it can reach
-   and opens byte streams to them. Each stream carries the
-   [sandbox protocol](2026-11-27-sandbox-protocol-spec.md), so a runner can be
-   any implementation of it, not only needy's. Neither the cluster nor the
+   and opens byte streams to them. Each stream carries
+   [Boxide](2026-11-27-boxide-protocol-spec.md), an open sandbox protocol, so
+   a runner can be any implementation of it, not only needy's. Neither the cluster nor the
    runner needs an inbound route.
 4. **End to end, the daemon and the runner authenticate each other.**
    Brokered streams carry TLS between the daemon and the runner, and the
@@ -176,11 +176,11 @@ A broker stream is an opaque byte stream between the daemon and a runner.
 Inside it, in order:
 
 1. TLS (§6.4).
-2. The sandbox protocol's length-prefixed binding
-   ([sandbox protocol §3](2026-11-27-sandbox-protocol-spec.md)): one session,
+2. Boxide's length-prefixed binding
+   ([Boxide §3](2026-11-27-boxide-protocol-spec.md)): one session,
    with exec and file streams multiplexed and flow-controlled end to end.
 
-The daemon is the session's client. It maps sandbox exec and file streams
+The daemon is the session's client. It maps Boxide exec and file streams
 onto the same relay, routing and file-domain interception it uses for
 `RunnerService.Task` and `FsTask`, so a brokered runner looks like any other
 runner to the rest of the daemon. A runner needs protobuf, TLS and a byte
@@ -258,10 +258,10 @@ script.
    new binding, operator `needy run bind/unbind`, trace events. Cell: one run,
    two native runners, rebind mid-run, check the trace and the drained
    instance.
-2. **Sandbox protocol v1 core.** `proto/sandbox/v1`, the frame and
+2. **Boxide v1 core.** `proto/boxide/v1`, the frame and
    session layer, the daemon's client side, `needy runner`'s server side, and
    the conformance suite
-   ([sandbox protocol](2026-11-27-sandbox-protocol-spec.md)). TLS over a
+   ([Boxide](2026-11-27-boxide-protocol-spec.md)). TLS over a
    stream source with a pinned fingerprint. Cell: a runner joining through a
    local stdio relay and passing the suite.
 3. **Broker protocol.** `needy.v1.broker` schema, the daemon's broker client,
