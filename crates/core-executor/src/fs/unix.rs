@@ -1,6 +1,11 @@
 //! macOS / BSD executor filesystem server (`UnixFs`):
 //! - `openat` + `O_NOFOLLOW | O_CLOEXEC` + `fstatat` with a `(dev, ino)` inode
 //!   table and non-zero CAS refcounting (`Forget` eviction).
+//! - Regular files and symlinks never pin FDs in `InodeData` (only active open
+//!   `HandleData` entries hold regular-file FDs); non-root directory FDs are
+//!   bounded by an LRU cache (`DIR_FD_CACHE_CAP`) and reopened transparently on
+//!   miss by walking `loc` up to the nearest cached ancestor (at worst
+//!   `ROOT_INO`, which stays permanently pinned).
 //! - `is_safe_inode` gate allowing only regular files, directories and symlinks.
 //! - Hybrid in-process `AdvisoryLockTable` + `fcntl(F_GETLK/F_SETLK)` so
 //!   multi-handle lock conflicts within the same executor process AND across
@@ -21,14 +26,14 @@ use super::{AdvisoryLockTable, FileName, ROOT_INO, adjust_writeback_flags, errno
 
 type DevIno = (u64, u64);
 
+/// Default maximum number of non-root directory FDs kept open in `UnixFs`.
+const DIR_FD_CACHE_CAP: usize = 1024;
+
 struct InodeData {
   dev_ino: DevIno,
   kind: v1::FsFileType,
-  /// Always `Some` for directories; `Some` for readable regular files so
-  /// `getattr`/`setattr` keep working even after unlink.
-  fd: Option<OwnedFd>,
-  /// Last known `(parent_ino, name)` for symlinks and reopening regular files
-  /// with write flags via `openat`.
+  /// Last known `(parent_ino, name)` for reopening evicted directories,
+  /// statting/opening closed regular files, and reading symlinks via `openat`.
   loc: Mutex<Option<(u64, CString)>>,
   refcount: AtomicU64,
 }
@@ -65,14 +70,75 @@ struct InodeStore {
   by_key: HashMap<DevIno, u64>,
 }
 
+/// Bounded LRU cache of non-root directory file descriptors.
+///
+/// Cache hits and removals are O(1); eviction only scans the cache when
+/// inserting above `cap` (default 1024).
+struct DirFdCache {
+  cap: usize,
+  tick: u64,
+  entries: HashMap<u64, (Arc<OwnedFd>, u64)>,
+}
+
+impl DirFdCache {
+  fn new(cap: usize) -> Self {
+    Self {
+      cap,
+      tick: 0,
+      entries: HashMap::new(),
+    }
+  }
+
+  fn next_tick(&mut self) -> u64 {
+    self.tick = self.tick.wrapping_add(1);
+    self.tick
+  }
+
+  fn get(&mut self, ino: u64) -> Option<Arc<OwnedFd>> {
+    let tick = self.next_tick();
+    let entry = self.entries.get_mut(&ino)?;
+    entry.1 = tick;
+    Some(Arc::clone(&entry.0))
+  }
+
+  fn insert(&mut self, ino: u64, fd: Arc<OwnedFd>) {
+    if ino == ROOT_INO || self.cap == 0 {
+      return;
+    }
+    let tick = self.next_tick();
+    self.entries.insert(ino, (fd, tick));
+    while self.entries.len() > self.cap {
+      if let Some(&lru_ino) = self.entries.iter().min_by_key(|&(_, &(_, t))| t).map(|(k, _)| k) {
+        self.entries.remove(&lru_ino);
+      } else {
+        break;
+      }
+    }
+  }
+
+  fn remove(&mut self, ino: u64) {
+    self.entries.remove(&ino);
+  }
+
+  #[cfg(test)]
+  fn len(&self) -> usize {
+    self.entries.len()
+  }
+}
+
 struct HandleData {
+  ino: u64,
+  writable: bool,
   fd: OwnedFd,
 }
 
 pub(crate) struct UnixFs {
   root_attr: v1::FsAttr,
+  /// Permanently pinned workspace root FD (never evicted).
+  root_fd: Arc<OwnedFd>,
   case_insensitive: bool,
   inodes: RwLock<InodeStore>,
+  dir_fds: Mutex<DirFdCache>,
   handles: RwLock<HashMap<u64, Arc<HandleData>>>,
   locks: AdvisoryLockTable,
   next_ino: AtomicU64,
@@ -81,12 +147,16 @@ pub(crate) struct UnixFs {
 
 impl UnixFs {
   pub(crate) fn open(root: &Path) -> Result<Self, v1::FsError> {
+    Self::open_with_dir_cache_cap(root, DIR_FD_CACHE_CAP)
+  }
+
+  fn open_with_dir_cache_cap(root: &Path, dir_fd_cache_cap: usize) -> Result<Self, v1::FsError> {
     let c_root = path_to_cstring(root)?;
     let raw = unsafe { libc::open(c_root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
     if raw < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
     }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let fd = Arc::new(unsafe { OwnedFd::from_raw_fd(raw) });
     let st = fstat_fd(fd.as_raw_fd())?;
     if !is_safe_inode(st.st_mode) || (st.st_mode & libc::S_IFMT) != libc::S_IFDIR {
       return Err(fs_err(errno::ENOTDIR, "workspace root is not a directory"));
@@ -98,7 +168,6 @@ impl UnixFs {
     let root_data = Arc::new(InodeData {
       dev_ino,
       kind: v1::FsFileType::Directory,
-      fd: Some(fd),
       loc: Mutex::new(None),
       refcount: AtomicU64::new(1),
     });
@@ -110,13 +179,22 @@ impl UnixFs {
 
     Ok(Self {
       root_attr,
+      root_fd: fd,
       case_insensitive,
       inodes: RwLock::new(InodeStore { by_ino, by_key }),
+      dir_fds: Mutex::new(DirFdCache::new(dir_fd_cache_cap)),
       handles: RwLock::new(HashMap::new()),
       locks: AdvisoryLockTable::new(),
       next_ino: AtomicU64::new(ROOT_INO + 1),
       next_fh: AtomicU64::new(1),
     })
+  }
+
+  #[cfg(test)]
+  pub(crate) fn pinned_fd_count(&self) -> usize {
+    // 1 for the permanently pinned `root_fd`, plus cached non-root directory FDs.
+    // Regular files and symlinks never hold pinned FDs in `InodeData`.
+    1 + self.dir_fds.lock().unwrap_or_else(|e| e.into_inner()).len()
   }
 
   pub(crate) fn root_attr(&self) -> v1::FsAttr {
@@ -132,13 +210,63 @@ impl UnixFs {
     store.by_ino.get(&ino).cloned().ok_or_else(|| fs_err(errno::ENOENT, format!("unknown inode {ino}")))
   }
 
-  fn get_dir_fd(&self, ino: u64) -> Result<(Arc<InodeData>, RawFd), v1::FsError> {
-    let node = self.get_inode(ino)?;
-    if node.kind != v1::FsFileType::Directory {
-      return Err(fs_err(errno::ENOTDIR, "not a directory"));
+  fn get_cached_dir_fd(&self, ino: u64) -> Option<Arc<OwnedFd>> {
+    self.dir_fds.lock().unwrap_or_else(|e| e.into_inner()).get(ino)
+  }
+
+  fn cache_dir_fd(&self, ino: u64, fd: Arc<OwnedFd>) {
+    self.dir_fds.lock().unwrap_or_else(|e| e.into_inner()).insert(ino, fd);
+  }
+
+  fn evict_dir_fd(&self, ino: u64) {
+    self.dir_fds.lock().unwrap_or_else(|e| e.into_inner()).remove(ino);
+  }
+
+  /// Return an open directory FD for `ino`, reopening evicted non-root
+  /// directories transparently by walking `loc` up to the nearest cached
+  /// ancestor (at worst `ROOT_INO`).
+  fn ensure_dir_fd(&self, ino: u64) -> Result<Arc<OwnedFd>, v1::FsError> {
+    if ino == ROOT_INO {
+      return Ok(Arc::clone(&self.root_fd));
     }
-    let fd = node.fd.as_ref().ok_or_else(|| fs_err(errno::EBADF, "directory has no open fd"))?.as_raw_fd();
-    Ok((node, fd))
+    if let Some(fd) = self.get_cached_dir_fd(ino) {
+      return Ok(fd);
+    }
+
+    let mut chain: Vec<(u64, CString)> = Vec::new();
+    let mut cur = ino;
+    let mut anchor_fd: Option<Arc<OwnedFd>> = None;
+    let mut depth = 0usize;
+    while cur != ROOT_INO {
+      if let Some(fd) = self.get_cached_dir_fd(cur) {
+        anchor_fd = Some(fd);
+        break;
+      }
+      depth += 1;
+      if depth > 4096 {
+        return Err(fs_err(errno::ELOOP, "directory ancestor chain too deep"));
+      }
+      let node = self.get_inode(cur)?;
+      if node.kind != v1::FsFileType::Directory {
+        return Err(fs_err(errno::ENOTDIR, "not a directory"));
+      }
+      let (parent, name) = node_loc(&node)?;
+      chain.push((cur, name));
+      cur = parent;
+    }
+
+    let mut cur_fd = anchor_fd.unwrap_or_else(|| Arc::clone(&self.root_fd));
+    for (dir_ino, name) in chain.into_iter().rev() {
+      let raw =
+        unsafe { libc::openat(cur_fd.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+      if raw < 0 {
+        return Err(io_to_fs_err(io::Error::last_os_error()));
+      }
+      let owned = Arc::new(unsafe { OwnedFd::from_raw_fd(raw) });
+      self.cache_dir_fd(dir_ino, Arc::clone(&owned));
+      cur_fd = owned;
+    }
+    Ok(cur_fd)
   }
 
   fn get_handle(&self, fh: u64) -> Result<Arc<HandleData>, v1::FsError> {
@@ -146,14 +274,24 @@ impl UnixFs {
     handles.get(&fh).cloned().ok_or_else(|| fs_err(errno::EBADF, format!("unknown file handle {fh}")))
   }
 
-  fn insert_handle(&self, fd: OwnedFd) -> u64 {
+  fn find_open_handle_for_ino(&self, ino: u64) -> Option<Arc<HandleData>> {
+    let handles = self.handles.read().unwrap_or_else(|e| e.into_inner());
+    handles.values().find(|h| h.ino == ino).cloned()
+  }
+
+  fn find_writable_open_handle_for_ino(&self, ino: u64) -> Option<Arc<HandleData>> {
+    let handles = self.handles.read().unwrap_or_else(|e| e.into_inner());
+    handles.values().find(|h| h.ino == ino && h.writable).cloned()
+  }
+
+  fn insert_handle(&self, ino: u64, fd: OwnedFd, writable: bool) -> u64 {
     let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
     let mut handles = self.handles.write().unwrap_or_else(|e| e.into_inner());
-    handles.insert(fh, Arc::new(HandleData { fd }));
+    handles.insert(fh, Arc::new(HandleData { ino, writable, fd }));
     fh
   }
 
-  fn pin_child(&self, parent: u64, c_name: CString, fd: Option<OwnedFd>, st: &libc::stat) -> Result<v1::FsAttr, v1::FsError> {
+  fn register_inode(&self, parent: u64, c_name: CString, st: &libc::stat) -> Result<v1::FsAttr, v1::FsError> {
     if !is_safe_inode(st.st_mode) {
       return Err(fs_err(errno::EACCES, "unsupported special file type"));
     }
@@ -184,7 +322,6 @@ impl UnixFs {
     let data = Arc::new(InodeData {
       dev_ino,
       kind,
-      fd,
       loc: Mutex::new(Some((parent, c_name))),
       refcount: AtomicU64::new(1),
     });
@@ -194,34 +331,30 @@ impl UnixFs {
   }
 
   pub(crate) fn lookup(&self, parent: u64, name: FileName<'_>) -> Result<v1::FsAttr, v1::FsError> {
-    let (_dir, dir_fd) = self.get_dir_fd(parent)?;
+    let dir_fd = self.ensure_dir_fd(parent)?;
     let c_name = name_to_cstring(name)?;
-    let st = fstatat_nofollow(dir_fd, &c_name)?;
+    let st = fstatat_nofollow(dir_fd.as_raw_fd(), &c_name)?;
     if !is_safe_inode(st.st_mode) {
       return Err(fs_err(errno::EACCES, "unsupported special file type"));
     }
 
-    let fd = match st.st_mode & libc::S_IFMT {
-      libc::S_IFDIR => {
-        let raw = unsafe { libc::openat(dir_fd, c_name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-        if raw < 0 {
-          return Err(io_to_fs_err(io::Error::last_os_error()));
-        }
-        Some(unsafe { OwnedFd::from_raw_fd(raw) })
+    let child_dir_fd = if (st.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+      let raw = unsafe {
+        libc::openat(dir_fd.as_raw_fd(), c_name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+      };
+      if raw < 0 {
+        return Err(io_to_fs_err(io::Error::last_os_error()));
       }
-      libc::S_IFREG => {
-        // Best-effort read-only pin so `getattr` keeps working after unlink.
-        let raw = unsafe { libc::openat(dir_fd, c_name.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-        if raw >= 0 {
-          Some(unsafe { OwnedFd::from_raw_fd(raw) })
-        } else {
-          None
-        }
-      }
-      _ => None,
+      Some(Arc::new(unsafe { OwnedFd::from_raw_fd(raw) }))
+    } else {
+      None
     };
 
-    self.pin_child(parent, c_name, fd, &st)
+    let attr = self.register_inode(parent, c_name, &st)?;
+    if let Some(fd) = child_dir_fd {
+      self.cache_dir_fd(attr.ino, fd);
+    }
+    Ok(attr)
   }
 
   pub(crate) fn getattr(&self, ino: u64, fh: Option<u64>) -> Result<v1::FsAttr, v1::FsError> {
@@ -231,13 +364,20 @@ impl UnixFs {
       return Ok(stat_to_attr(ino, &st));
     }
     let node = self.get_inode(ino)?;
-    if let Some(ref fd) = node.fd {
-      let st = fstat_fd(fd.as_raw_fd())?;
+    if node.kind == v1::FsFileType::Directory {
+      let dir_fd = self.ensure_dir_fd(ino)?;
+      let st = fstat_fd(dir_fd.as_raw_fd())?;
+      return Ok(stat_to_attr(ino, &st));
+    }
+    // Fall back to an active open handle for `ino` so open-unlinked files (and
+    // files replaced by atomic rename while open) still answer `getattr(ino, None)`.
+    if let Some(handle) = self.find_open_handle_for_ino(ino) {
+      let st = fstat_fd(handle.fd.as_raw_fd())?;
       return Ok(stat_to_attr(ino, &st));
     }
     let (parent, name) = node_loc(&node)?;
-    let (_pdir, pfd) = self.get_dir_fd(parent)?;
-    let st = fstatat_nofollow(pfd, &name)?;
+    let pfd = self.ensure_dir_fd(parent)?;
+    let st = fstatat_nofollow(pfd.as_raw_fd(), &name)?;
     Ok(stat_to_attr(ino, &st))
   }
 
@@ -251,12 +391,15 @@ impl UnixFs {
     if let Some(mode) = req.mode {
       let rc = if let Some(ref h) = handle {
         unsafe { libc::fchmod(h.fd.as_raw_fd(), (mode & 0o7777) as libc::mode_t) }
-      } else if let Some(ref fd) = node.fd {
-        unsafe { libc::fchmod(fd.as_raw_fd(), (mode & 0o7777) as libc::mode_t) }
+      } else if node.kind == v1::FsFileType::Directory {
+        let dir_fd = self.ensure_dir_fd(req.ino)?;
+        unsafe { libc::fchmod(dir_fd.as_raw_fd(), (mode & 0o7777) as libc::mode_t) }
+      } else if let Some(h) = self.find_open_handle_for_ino(req.ino) {
+        unsafe { libc::fchmod(h.fd.as_raw_fd(), (mode & 0o7777) as libc::mode_t) }
       } else {
         let (parent, name) = node_loc(&node)?;
-        let (_pdir, pfd) = self.get_dir_fd(parent)?;
-        unsafe { libc::fchmodat(pfd, name.as_ptr(), (mode & 0o7777) as libc::mode_t, 0) }
+        let pfd = self.ensure_dir_fd(parent)?;
+        unsafe { libc::fchmodat(pfd.as_raw_fd(), name.as_ptr(), (mode & 0o7777) as libc::mode_t, 0) }
       };
       if rc < 0 {
         return Err(io_to_fs_err(io::Error::last_os_error()));
@@ -266,10 +409,12 @@ impl UnixFs {
     if let Some(size) = req.size {
       let rc = if let Some(ref h) = handle {
         unsafe { libc::ftruncate(h.fd.as_raw_fd(), size as libc::off_t) }
+      } else if let Some(h) = self.find_writable_open_handle_for_ino(req.ino) {
+        unsafe { libc::ftruncate(h.fd.as_raw_fd(), size as libc::off_t) }
       } else {
         let (parent, name) = node_loc(&node)?;
-        let (_pdir, pfd) = self.get_dir_fd(parent)?;
-        let raw = unsafe { libc::openat(pfd, name.as_ptr(), libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        let pfd = self.ensure_dir_fd(parent)?;
+        let raw = unsafe { libc::openat(pfd.as_raw_fd(), name.as_ptr(), libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
         if raw < 0 {
           return Err(io_to_fs_err(io::Error::last_os_error()));
         }
@@ -306,12 +451,15 @@ impl UnixFs {
       ];
       let rc = if let Some(ref h) = handle {
         unsafe { libc::futimens(h.fd.as_raw_fd(), times.as_ptr()) }
-      } else if let Some(ref fd) = node.fd {
-        unsafe { libc::futimens(fd.as_raw_fd(), times.as_ptr()) }
+      } else if node.kind == v1::FsFileType::Directory {
+        let dir_fd = self.ensure_dir_fd(req.ino)?;
+        unsafe { libc::futimens(dir_fd.as_raw_fd(), times.as_ptr()) }
+      } else if let Some(h) = self.find_open_handle_for_ino(req.ino) {
+        unsafe { libc::futimens(h.fd.as_raw_fd(), times.as_ptr()) }
       } else {
         let (parent, name) = node_loc(&node)?;
-        let (_pdir, pfd) = self.get_dir_fd(parent)?;
-        unsafe { libc::utimensat(pfd, name.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) }
+        let pfd = self.ensure_dir_fd(parent)?;
+        unsafe { libc::utimensat(pfd.as_raw_fd(), name.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) }
       };
       if rc < 0 {
         return Err(io_to_fs_err(io::Error::last_os_error()));
@@ -328,8 +476,8 @@ impl UnixFs {
     max_entries: usize,
     generation: u64,
   ) -> Result<(Vec<v1::FsDirEntry>, bool), v1::FsError> {
-    let (_dir, dir_fd) = self.get_dir_fd(ino)?;
-    let dup_fd = unsafe { libc::fcntl(dir_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    let dir_fd = self.ensure_dir_fd(ino)?;
+    let dup_fd = unsafe { libc::fcntl(dir_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if dup_fd < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
     }
@@ -400,25 +548,26 @@ impl UnixFs {
     }
     let adjusted = adjust_writeback_flags(flags, writeback);
     let host_flags = linux_open_flags_to_host(adjusted) | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let writable = (host_flags & libc::O_ACCMODE) != libc::O_RDONLY;
 
     let fd = if node.kind == v1::FsFileType::Directory {
-      let dir_fd = node.fd.as_ref().ok_or_else(|| fs_err(errno::EBADF, "directory has no open fd"))?.as_raw_fd();
-      let dup = unsafe { libc::fcntl(dir_fd, libc::F_DUPFD_CLOEXEC, 0) };
+      let dir_fd = self.ensure_dir_fd(ino)?;
+      let dup = unsafe { libc::fcntl(dir_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
       if dup < 0 {
         return Err(io_to_fs_err(io::Error::last_os_error()));
       }
       unsafe { OwnedFd::from_raw_fd(dup) }
     } else {
       let (parent, name) = node_loc(&node)?;
-      let (_pdir, pfd) = self.get_dir_fd(parent)?;
-      let raw = unsafe { libc::openat(pfd, name.as_ptr(), host_flags) };
+      let pfd = self.ensure_dir_fd(parent)?;
+      let raw = unsafe { libc::openat(pfd.as_raw_fd(), name.as_ptr(), host_flags) };
       if raw < 0 {
         return Err(io_to_fs_err(io::Error::last_os_error()));
       }
       unsafe { OwnedFd::from_raw_fd(raw) }
     };
 
-    let fh = self.insert_handle(fd);
+    let fh = self.insert_handle(ino, fd, writable && node.kind != v1::FsFileType::Directory);
     Ok((fh, adjusted))
   }
 
@@ -494,35 +643,29 @@ impl UnixFs {
     flags: u32,
     writeback: bool,
   ) -> Result<(v1::FsAttr, u64, u32), v1::FsError> {
-    let (_dir, dir_fd) = self.get_dir_fd(parent)?;
+    let dir_fd = self.ensure_dir_fd(parent)?;
     let c_name = name_to_cstring(name)?;
     let adjusted = adjust_writeback_flags(flags, writeback);
     let host_flags = linux_open_flags_to_host(adjusted) | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-    let raw = unsafe { libc::openat(dir_fd, c_name.as_ptr(), host_flags, (mode & 0o7777) as libc::c_uint) };
+    let writable = (host_flags & libc::O_ACCMODE) != libc::O_RDONLY;
+    let raw = unsafe { libc::openat(dir_fd.as_raw_fd(), c_name.as_ptr(), host_flags, (mode & 0o7777) as libc::c_uint) };
     if raw < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
     }
     let file_fd = unsafe { OwnedFd::from_raw_fd(raw) };
     let st = fstat_fd(file_fd.as_raw_fd())?;
 
-    let pin_raw = unsafe { libc::openat(dir_fd, c_name.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-    let pin_fd = if pin_raw >= 0 {
-      Some(unsafe { OwnedFd::from_raw_fd(pin_raw) })
-    } else {
-      None
-    };
-
-    let attr = self.pin_child(parent, c_name, pin_fd, &st)?;
-    let fh = self.insert_handle(file_fd);
+    let attr = self.register_inode(parent, c_name, &st)?;
+    let fh = self.insert_handle(attr.ino, file_fd, writable);
     Ok((attr, fh, adjusted))
   }
 
   pub(crate) fn create_and_write(&self, parent: u64, name: FileName<'_>, mode: u32, data: &[u8]) -> Result<v1::FsAttr, v1::FsError> {
-    let (_dir, dir_fd) = self.get_dir_fd(parent)?;
+    let dir_fd = self.ensure_dir_fd(parent)?;
     let c_name = name_to_cstring(name)?;
     let raw = unsafe {
       libc::openat(
-        dir_fd,
+        dir_fd.as_raw_fd(),
         c_name.as_ptr(),
         libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         (mode & 0o7777) as libc::c_uint,
@@ -536,19 +679,13 @@ impl UnixFs {
     let st = fstat_fd(file_fd.as_raw_fd())?;
     drop(file_fd);
 
-    let pin_raw = unsafe { libc::openat(dir_fd, c_name.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-    let pin_fd = if pin_raw >= 0 {
-      Some(unsafe { OwnedFd::from_raw_fd(pin_raw) })
-    } else {
-      None
-    };
-    self.pin_child(parent, c_name, pin_fd, &st)
+    self.register_inode(parent, c_name, &st)
   }
 
   pub(crate) fn mkdir(&self, parent: u64, name: FileName<'_>, mode: u32) -> Result<v1::FsAttr, v1::FsError> {
-    let (_dir, dir_fd) = self.get_dir_fd(parent)?;
+    let dir_fd = self.ensure_dir_fd(parent)?;
     let c_name = name_to_cstring(name)?;
-    let rc = unsafe { libc::mkdirat(dir_fd, c_name.as_ptr(), (mode & 0o7777) as libc::mode_t) };
+    let rc = unsafe { libc::mkdirat(dir_fd.as_raw_fd(), c_name.as_ptr(), (mode & 0o7777) as libc::mode_t) };
     if rc < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
     }
@@ -556,9 +693,9 @@ impl UnixFs {
   }
 
   pub(crate) fn unlink(&self, parent: u64, name: FileName<'_>) -> Result<(), v1::FsError> {
-    let (_dir, dir_fd) = self.get_dir_fd(parent)?;
+    let dir_fd = self.ensure_dir_fd(parent)?;
     let c_name = name_to_cstring(name)?;
-    let rc = unsafe { libc::unlinkat(dir_fd, c_name.as_ptr(), 0) };
+    let rc = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), c_name.as_ptr(), 0) };
     if rc < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
     }
@@ -566,11 +703,21 @@ impl UnixFs {
   }
 
   pub(crate) fn rmdir(&self, parent: u64, name: FileName<'_>) -> Result<(), v1::FsError> {
-    let (_dir, dir_fd) = self.get_dir_fd(parent)?;
+    let dir_fd = self.ensure_dir_fd(parent)?;
     let c_name = name_to_cstring(name)?;
-    let rc = unsafe { libc::unlinkat(dir_fd, c_name.as_ptr(), libc::AT_REMOVEDIR) };
+    let target_key = fstatat_nofollow(dir_fd.as_raw_fd(), &c_name).ok().map(|st| stat_dev_ino(&st));
+    let rc = unsafe { libc::unlinkat(dir_fd.as_raw_fd(), c_name.as_ptr(), libc::AT_REMOVEDIR) };
     if rc < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
+    }
+    if let Some(key) = target_key {
+      let target_ino = {
+        let store = self.inodes.read().unwrap_or_else(|e| e.into_inner());
+        store.by_key.get(&key).copied()
+      };
+      if let Some(ino) = target_ino {
+        self.evict_dir_fd(ino);
+      }
     }
     Ok(())
   }
@@ -583,16 +730,16 @@ impl UnixFs {
     new_name: FileName<'_>,
     flags: u32,
   ) -> Result<(), v1::FsError> {
-    let (_old_dir, old_fd) = self.get_dir_fd(parent)?;
-    let (_new_dir, new_fd) = self.get_dir_fd(new_parent)?;
+    let old_fd = self.ensure_dir_fd(parent)?;
+    let new_fd = self.ensure_dir_fd(new_parent)?;
     let c_old = name_to_cstring(name)?;
     let c_new = name_to_cstring(new_name)?;
 
     // Capture source `(dev, ino)` before rename so we can update its `loc`.
-    let src_key = fstatat_nofollow(old_fd, &c_old).ok().map(|st| stat_dev_ino(&st));
+    let src_key = fstatat_nofollow(old_fd.as_raw_fd(), &c_old).ok().map(|st| stat_dev_ino(&st));
 
     if flags == 0 {
-      let rc = unsafe { libc::renameat(old_fd, c_old.as_ptr(), new_fd, c_new.as_ptr()) };
+      let rc = unsafe { libc::renameat(old_fd.as_raw_fd(), c_old.as_ptr(), new_fd.as_raw_fd(), c_new.as_ptr()) };
       if rc < 0 {
         return Err(io_to_fs_err(io::Error::last_os_error()));
       }
@@ -610,7 +757,7 @@ impl UnixFs {
         if (flags & !known) != 0 {
           return Err(fs_err(errno::EINVAL, "unsupported rename flags"));
         }
-        let rc = unsafe { libc::renameatx_np(old_fd, c_old.as_ptr(), new_fd, c_new.as_ptr(), mac_flags) };
+        let rc = unsafe { libc::renameatx_np(old_fd.as_raw_fd(), c_old.as_ptr(), new_fd.as_raw_fd(), c_new.as_ptr(), mac_flags) };
         if rc < 0 {
           return Err(io_to_fs_err(io::Error::last_os_error()));
         }
@@ -633,10 +780,10 @@ impl UnixFs {
   }
 
   pub(crate) fn symlink(&self, parent: u64, name: FileName<'_>, link_target: &str) -> Result<v1::FsAttr, v1::FsError> {
-    let (_dir, dir_fd) = self.get_dir_fd(parent)?;
+    let dir_fd = self.ensure_dir_fd(parent)?;
     let c_name = name_to_cstring(name)?;
     let c_target = CString::new(link_target).map_err(|_| fs_err(errno::EINVAL, "invalid symlink target"))?;
-    let rc = unsafe { libc::symlinkat(c_target.as_ptr(), dir_fd, c_name.as_ptr()) };
+    let rc = unsafe { libc::symlinkat(c_target.as_ptr(), dir_fd.as_raw_fd(), c_name.as_ptr()) };
     if rc < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
     }
@@ -646,9 +793,9 @@ impl UnixFs {
   pub(crate) fn readlink(&self, ino: u64) -> Result<String, v1::FsError> {
     let node = self.get_inode(ino)?;
     let (parent, name) = node_loc(&node)?;
-    let (_pdir, pfd) = self.get_dir_fd(parent)?;
+    let pfd = self.ensure_dir_fd(parent)?;
     let mut buf = vec![0u8; 4096];
-    let n = unsafe { libc::readlinkat(pfd, name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    let n = unsafe { libc::readlinkat(pfd.as_raw_fd(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
     if n < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
     }
@@ -659,10 +806,10 @@ impl UnixFs {
   pub(crate) fn link(&self, ino: u64, new_parent: u64, new_name: FileName<'_>) -> Result<v1::FsAttr, v1::FsError> {
     let node = self.get_inode(ino)?;
     let (old_parent, old_name) = node_loc(&node)?;
-    let (_old_dir, old_fd) = self.get_dir_fd(old_parent)?;
-    let (_new_dir, new_fd) = self.get_dir_fd(new_parent)?;
+    let old_fd = self.ensure_dir_fd(old_parent)?;
+    let new_fd = self.ensure_dir_fd(new_parent)?;
     let c_new = name_to_cstring(new_name)?;
-    let rc = unsafe { libc::linkat(old_fd, old_name.as_ptr(), new_fd, c_new.as_ptr(), 0) };
+    let rc = unsafe { libc::linkat(old_fd.as_raw_fd(), old_name.as_ptr(), new_fd.as_raw_fd(), c_new.as_ptr(), 0) };
     if rc < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
     }
@@ -671,14 +818,13 @@ impl UnixFs {
 
   pub(crate) fn statfs(&self, ino: u64) -> Result<v1::FsStatFsReply, v1::FsError> {
     let node = self.get_inode(ino)?;
-    let fd = if let Some(ref fd) = node.fd {
-      fd.as_raw_fd()
+    let fd = if node.kind == v1::FsFileType::Directory {
+      self.ensure_dir_fd(ino)?
     } else {
-      let (_root, rfd) = self.get_dir_fd(ROOT_INO)?;
-      rfd
+      Arc::clone(&self.root_fd)
     };
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstatvfs(fd, &mut st) };
+    let rc = unsafe { libc::fstatvfs(fd.as_raw_fd(), &mut st) };
     if rc < 0 {
       return Err(io_to_fs_err(io::Error::last_os_error()));
     }
@@ -695,21 +841,32 @@ impl UnixFs {
   }
 
   pub(crate) fn forget(&self, items: &[v1::FsForgetItem]) {
-    let mut store = self.inodes.write().unwrap_or_else(|e| e.into_inner());
-    for item in items {
-      if item.ino == ROOT_INO || item.nlookup == 0 {
-        continue;
+    let mut evicted_dirs = Vec::new();
+    {
+      let mut store = self.inodes.write().unwrap_or_else(|e| e.into_inner());
+      for item in items {
+        if item.ino == ROOT_INO || item.nlookup == 0 {
+          continue;
+        }
+        let evict = if let Some(entry) = store.by_ino.get(&item.ino) {
+          entry.dec_ref(item.nlookup) <= item.nlookup
+        } else {
+          false
+        };
+        if evict && let Some(removed) = store.by_ino.remove(&item.ino) {
+          if store.by_key.get(&removed.dev_ino) == Some(&item.ino) {
+            store.by_key.remove(&removed.dev_ino);
+          }
+          if removed.kind == v1::FsFileType::Directory {
+            evicted_dirs.push(item.ino);
+          }
+        }
       }
-      let evict = if let Some(entry) = store.by_ino.get(&item.ino) {
-        entry.dec_ref(item.nlookup) <= item.nlookup
-      } else {
-        false
-      };
-      if evict
-        && let Some(removed) = store.by_ino.remove(&item.ino)
-        && store.by_key.get(&removed.dev_ino) == Some(&item.ino)
-      {
-        store.by_key.remove(&removed.dev_ino);
+    }
+    if !evicted_dirs.is_empty() {
+      let mut cache = self.dir_fds.lock().unwrap_or_else(|e| e.into_inner());
+      for ino in evicted_dirs {
+        cache.remove(ino);
       }
     }
   }
@@ -942,4 +1099,175 @@ fn name_to_cstring(name: FileName<'_>) -> Result<CString, v1::FsError> {
 
 fn path_to_cstring(path: &Path) -> Result<CString, v1::FsError> {
   CString::new(OsStr::as_bytes(path.as_os_str())).map_err(|_| fs_err(errno::EINVAL, "path contains NUL"))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn regular_file_walk_pins_zero_file_fds_and_bounds_dir_fds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let num_dirs = 30usize;
+    let total_files = 500usize;
+    for d in 0..num_dirs {
+      std::fs::create_dir(tmp.path().join(format!("dir_{d:02}"))).unwrap();
+    }
+    for i in 0..total_files {
+      let d = i % num_dirs;
+      let path = tmp.path().join(format!("dir_{d:02}")).join(format!("file_{i:04}.txt"));
+      std::fs::write(&path, format!("payload-{i}")).unwrap();
+    }
+
+    let fs = UnixFs::open(tmp.path()).unwrap();
+    assert_eq!(fs.pinned_fd_count(), 1); // root only
+
+    let mut seen_files = 0usize;
+    for d in 0..num_dirs {
+      let dname = format!("dir_{d:02}");
+      let dir_attr = fs.lookup(ROOT_INO, FileName::parse(&dname).unwrap()).unwrap();
+      let (entries, eof) = fs.readdirplus(dir_attr.ino, 0, 256, 1).unwrap();
+      assert!(eof);
+      for ent in entries {
+        let attr = fs.getattr(ent.ino, None).unwrap();
+        assert_eq!(attr.kind, v1::FsFileType::Regular as i32);
+        seen_files += 1;
+      }
+    }
+    assert_eq!(seen_files, total_files);
+
+    // Also exercise `create_and_write` and `create` + `release` on regular files.
+    let dir0 = fs.lookup(ROOT_INO, FileName::parse("dir_00").unwrap()).unwrap();
+    let cw = fs.create_and_write(dir0.ino, FileName::parse("extra_cw.txt").unwrap(), 0o644, b"extra").unwrap();
+    assert_eq!(fs.getattr(cw.ino, None).unwrap().size, 5);
+    let (cr_attr, fh, _) = fs.create(dir0.ino, FileName::parse("extra_cr.txt").unwrap(), 0o644, linux_flags::O_RDWR, false).unwrap();
+    fs.write(cr_attr.ino, fh, 0, b"created").unwrap();
+    fs.release(cr_attr.ino, fh, 0).unwrap();
+
+    // 500+ regular files walked and created -> 0 regular-file FDs pinned, only
+    // root + 30 subdirectories (31 <= 32).
+    assert_eq!(fs.handles.read().unwrap().len(), 0);
+    assert_eq!(fs.pinned_fd_count(), 1 + num_dirs);
+    assert!(fs.pinned_fd_count() <= 32);
+  }
+
+  #[test]
+  fn dir_fd_lru_cache_bounds_fds_and_reopens_transparently() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Build 10 nested directories (`nest_0/.../nest_9`) + 10 sibling directories (`sib_0`..`sib_9`).
+    let mut nested_path = tmp.path().to_path_buf();
+    for i in 0..10 {
+      nested_path = nested_path.join(format!("nest_{i}"));
+      std::fs::create_dir(&nested_path).unwrap();
+      std::fs::write(nested_path.join("data.txt"), format!("nested-{i}")).unwrap();
+    }
+    for i in 0..10 {
+      let sib = tmp.path().join(format!("sib_{i}"));
+      std::fs::create_dir(&sib).unwrap();
+      std::fs::write(sib.join("data.txt"), format!("sibling-{i}")).unwrap();
+    }
+
+    let cap = 4usize;
+    let fs = UnixFs::open_with_dir_cache_cap(tmp.path(), cap).unwrap();
+    assert_eq!(fs.pinned_fd_count(), 1);
+
+    let mut nested_inos = Vec::with_capacity(10);
+    let mut parent = ROOT_INO;
+    for i in 0..10 {
+      let name = format!("nest_{i}");
+      let attr = fs.lookup(parent, FileName::parse(&name).unwrap()).unwrap();
+      assert!(fs.pinned_fd_count() <= 1 + cap, "pinned_fd_count={} exceeded {}", fs.pinned_fd_count(), 1 + cap);
+      nested_inos.push(attr.ino);
+      parent = attr.ino;
+    }
+
+    let mut sib_inos = Vec::with_capacity(10);
+    for i in 0..10 {
+      let name = format!("sib_{i}");
+      let attr = fs.lookup(ROOT_INO, FileName::parse(&name).unwrap()).unwrap();
+      assert!(fs.pinned_fd_count() <= 1 + cap, "pinned_fd_count={} exceeded {}", fs.pinned_fd_count(), 1 + cap);
+      sib_inos.push(attr.ino);
+    }
+
+    // Re-access earliest evicted nested & sibling directories (lookup, read, write).
+    for (idx, &dir_ino) in nested_inos.iter().enumerate() {
+      let f_attr = fs.lookup(dir_ino, FileName::parse("data.txt").unwrap()).unwrap();
+      let (fh, _) = fs.open_file(f_attr.ino, linux_flags::O_RDONLY, false).unwrap();
+      let (bytes, _) = fs.read(f_attr.ino, fh, 0, 64).unwrap();
+      fs.release(f_attr.ino, fh, 0).unwrap();
+      assert_eq!(bytes, format!("nested-{idx}").as_bytes());
+      assert!(fs.pinned_fd_count() <= 1 + cap);
+    }
+    for (idx, &dir_ino) in sib_inos.iter().enumerate() {
+      let f_attr = fs.lookup(dir_ino, FileName::parse("data.txt").unwrap()).unwrap();
+      let (fh, _) = fs.open_file(f_attr.ino, linux_flags::O_RDONLY, false).unwrap();
+      let (bytes, _) = fs.read(f_attr.ino, fh, 0, 64).unwrap();
+      fs.release(f_attr.ino, fh, 0).unwrap();
+      assert_eq!(bytes, format!("sibling-{idx}").as_bytes());
+      assert!(fs.pinned_fd_count() <= 1 + cap);
+    }
+
+    // Write into an evicted deep nested directory (`nest_9` was evicted while reading `sib_*`).
+    let deep_dir = nested_inos[9];
+    let created = fs.create_and_write(deep_dir, FileName::parse("after_evict.txt").unwrap(), 0o644, b"ok").unwrap();
+    assert_eq!(fs.getattr(created.ino, None).unwrap().size, 2);
+    assert!(fs.pinned_fd_count() <= 1 + cap);
+
+    // `rmdir` evicts the directory FD from the cache.
+    let ephemeral = fs.mkdir(ROOT_INO, FileName::parse("ephemeral_dir").unwrap(), 0o755).unwrap();
+    let before_rmdir = fs.pinned_fd_count();
+    fs.rmdir(ROOT_INO, FileName::parse("ephemeral_dir").unwrap()).unwrap();
+    assert_eq!(fs.pinned_fd_count(), before_rmdir - 1);
+    let _ = ephemeral;
+
+    // `forget` evicts the directory FD from the cache when refcount reaches 0.
+    let to_forget = fs.mkdir(ROOT_INO, FileName::parse("forget_dir").unwrap(), 0o755).unwrap();
+    let before_forget = fs.pinned_fd_count();
+    fs.forget(&[v1::FsForgetItem {
+      ino: to_forget.ino,
+      nlookup: 1,
+    }]);
+    assert_eq!(fs.pinned_fd_count(), before_forget - 1);
+  }
+
+  #[test]
+  fn open_unlinked_file_getattr_and_setattr_work_without_fh() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fs = UnixFs::open(tmp.path()).unwrap();
+
+    let (attr, fh, _) = fs.create(ROOT_INO, FileName::parse("unlinked.txt").unwrap(), 0o644, linux_flags::O_RDWR, false).unwrap();
+    fs.write(attr.ino, fh, 0, b"hello world").unwrap();
+    fs.unlink(ROOT_INO, FileName::parse("unlinked.txt").unwrap()).unwrap();
+
+    // `getattr(ino, None)` falls back to the open handle for `ino`.
+    let got = fs.getattr(attr.ino, None).unwrap();
+    assert_eq!(got.size, 11);
+
+    // `setattr(ino, fh: None, ...)` also succeeds via the open handle.
+    let updated = fs
+      .setattr(&v1::FsSetAttr {
+        ino: attr.ino,
+        fh: None,
+        mode: Some(0o600),
+        size: Some(5),
+        atime_sec: Some(1_700_000_000),
+        atime_nsec: Some(0),
+        mtime_sec: Some(1_700_000_123),
+        mtime_nsec: Some(0),
+      })
+      .unwrap();
+    assert_eq!(updated.size, 5);
+    assert_eq!(updated.perm & 0o777, 0o600);
+    assert_eq!(updated.mtime_sec, 1_700_000_123);
+
+    let (data, _) = fs.read(attr.ino, fh, 0, 16).unwrap();
+    assert_eq!(data, b"hello");
+
+    fs.release(attr.ino, fh, 0).unwrap();
+
+    // Once closed and unlinked, `getattr(ino, None)` returns ENOENT.
+    let err = fs.getattr(attr.ino, None).unwrap_err();
+    assert_eq!(err.errno, errno::ENOENT);
+  }
 }

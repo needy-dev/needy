@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::client::FsRpcClient;
-use super::neg_cache::NegativeCache;
+use super::neg_cache::{DEFAULT_CAPACITY, DEFAULT_TTL, NegativeCache};
 use super::prefetch::Prefetcher;
 use super::write_behind::WriteBehind;
 use super::{MountConfig, detach};
@@ -219,10 +219,11 @@ impl NeedyFs {
   pub fn new(client: Arc<FsRpcClient>, config: MountConfig) -> Self {
     let prefetcher = Prefetcher::new(Arc::clone(&client));
     let write_behind = WriteBehind::new(Arc::clone(&client));
+    let neg_cache = NegativeCache::with_case_sensitivity(DEFAULT_CAPACITY, DEFAULT_TTL, config.case_insensitive);
     Self {
       client,
       config,
-      neg_cache: NegativeCache::default(),
+      neg_cache,
       prefetcher,
       write_behind,
       dir_cache: Mutex::new(HashMap::new()),
@@ -784,6 +785,7 @@ pub async fn spawn_mount(client: Arc<FsRpcClient>, mut config: MountConfig) -> R
     .map_err(|errno| anyhow::anyhow!("FsMount failed with errno {errno}"))?;
 
   config.writable = mounted.writable;
+  config.case_insensitive = mounted.case_insensitive;
   if let Ok(mode) = FsLockMode::try_from(mounted.lock_mode)
     && mode != FsLockMode::Unspecified
   {

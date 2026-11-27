@@ -60,6 +60,40 @@ fn neg_cache_fifo_eviction() {
   assert!(cache.is_empty());
 }
 
+// ROOT CAUSE:
+//
+// On case-insensitive executors (Windows NTFS, macOS APFS) where
+// `FsMounted.case_insensitive == true`, a negative lookup for `"FOO.TXT"`
+// followed by creating `"foo.txt"` invalidated only the exact key `"foo.txt"`.
+//
+// Before the fix, `"FOO.TXT"` remained in `NegativeCache` and an immediate
+// `open("FOO.TXT")` failed with stale `ENOENT` until the 1s TTL expired.
+// The fix folds keys to lowercase when `case_insensitive` is true while
+// keeping case-sensitive caches distinct.
+#[test]
+fn neg_cache_case_insensitivity_evicts_across_casing() {
+  let insensitive = NegativeCache::with_case_sensitivity(16, Duration::from_secs(60), true);
+  insensitive.insert(1, "FOO.TXT");
+  assert!(insensitive.contains(1, "FOO.TXT"));
+  assert!(insensitive.contains(1, "foo.txt"));
+  assert!(insensitive.contains(1, "Foo.Txt"));
+
+  insensitive.invalidate(1, "foo.txt");
+  assert!(!insensitive.contains(1, "FOO.TXT"));
+  assert!(!insensitive.contains(1, "foo.txt"));
+  assert!(insensitive.is_empty());
+
+  let sensitive = NegativeCache::with_case_sensitivity(16, Duration::from_secs(60), false);
+  sensitive.insert(1, "FOO.TXT");
+  assert!(sensitive.contains(1, "FOO.TXT"));
+  assert!(!sensitive.contains(1, "foo.txt"));
+
+  sensitive.invalidate(1, "foo.txt");
+  assert!(sensitive.contains(1, "FOO.TXT"));
+  sensitive.invalidate(1, "FOO.TXT");
+  assert!(!sensitive.contains(1, "FOO.TXT"));
+}
+
 // ---------------------------------------------------------------------------
 // Prefetcher tests
 // ---------------------------------------------------------------------------
