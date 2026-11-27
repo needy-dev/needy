@@ -9,6 +9,7 @@
 //!   (`native`, `linux-container`).
 //! - [`engine`]: the Docker-compatible engine client both `linux-container`
 //!   drivers use, this crate's and the actor's.
+//! - [`fs`]: the executor-side workspace filesystem server (`HostFs`).
 //! - [`relay`]: the client side, which relays an exec stream to the local
 //!   terminal or pipes.
 //! - [`signals`]: signal names, this platform's numbers and shell exit codes.
@@ -16,6 +17,7 @@
 pub mod account;
 pub mod driver;
 pub mod engine;
+pub mod fs;
 pub mod process;
 pub mod relay;
 pub mod service;

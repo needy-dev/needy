@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use needy_api_proto::v1::client_service_server::ClientServiceServer;
+use needy_api_proto::v1::fs_service_server::FsServiceServer;
 use needy_api_proto::v1::guest_service_server::GuestServiceServer;
 use needy_api_proto::v1::health_service_server::HealthServiceServer;
 use needy_api_proto::v1::image_service_server::ImageServiceServer;
@@ -18,9 +19,9 @@ use needy_api_proto::v1::runner_service_server::RunnerServiceServer;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
 
-use crate::control::{Caller, Clients, Guest, Images, Processes, Runners, Runs};
+use crate::control::{Caller, Clients, Fs, Guest, Images, Processes, Runners, Runs};
 use crate::middleware::authentication::{AuthLayer, Credentials, Token};
-use crate::protocol::grpc::v1::{client, guest, health::Health, image, process, run, runner};
+use crate::protocol::grpc::v1::{client, fs, guest, health::Health, image, process, run, runner};
 
 // NOTICE: once cancelled, a server stops accepting and lets open calls
 // finish; an attached exec stream may never finish, so it gets 5 s.
@@ -178,10 +179,13 @@ impl Server {
   /// from that runner, and `Join` needs no bearer token.
   pub fn runners<R: Runners>(mut self, runners: Arc<R>) -> Self {
     let caller = self.caller.clone();
-    self.routes = self.routes.add_service(RunnerServiceServer::new(runner::Adapter {
+    let service = RunnerServiceServer::new(runner::Adapter {
       runners: runners.clone(),
       caller,
-    }));
+    })
+    .max_decoding_message_size(usize::MAX)
+    .max_encoding_message_size(usize::MAX);
+    self.routes = self.routes.add_service(service);
     self.runners = Some(runners);
     self
   }
@@ -206,6 +210,14 @@ impl Server {
   pub fn guest<G: Guest>(mut self, guest: Arc<G>) -> Self {
     let caller = self.caller.clone();
     self.routes = self.routes.add_service(GuestServiceServer::new(guest::Adapter { guest, caller }));
+    self
+  }
+
+  pub fn fs<F: Fs>(mut self, fs: Arc<F>) -> Self {
+    let caller = self.caller.clone();
+    let service =
+      FsServiceServer::new(fs::Adapter { fs, caller }).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX);
+    self.routes = self.routes.add_service(service);
     self
   }
 
@@ -473,6 +485,9 @@ impl Bound {
       let auth = AuthLayer::new(credentials).owner(owner_uid);
       let router = tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(Duration::from_secs(20)))
+        .http2_adaptive_window(Some(true))
+        .initial_stream_window_size(Some(16 * 1024 * 1024))
+        .initial_connection_window_size(Some(32 * 1024 * 1024))
         .tcp_nodelay(true)
         .layer(auth.clone())
         .add_routes(self.routes.clone());

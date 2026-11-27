@@ -34,7 +34,7 @@ pub enum Caller {
   /// run; it may not create, stop or read the logs of runs.
   Actor { run: String },
   /// A runner, by the credential it presented on the control listener. It
-  /// reaches `RunnerService.Heartbeat`, `Control` and `Task` only.
+  /// reaches `RunnerService.Heartbeat`, `Control`, `Task` and `FsTask` only.
   Runner { name: String },
 }
 
@@ -974,6 +974,30 @@ pub trait Runners: Send + Sync + 'static {
     task: u64,
     responses: FromRunner<needy_api_proto::v1::TaskRequest>,
   ) -> Result<ToRunner<needy_api_proto::v1::TaskResponse>>;
+  /// The stream `runner` opened for its workspace filesystem task `task`:
+  /// `responses` are the filesystem responses, the returned stream its
+  /// requests.
+  async fn fs_task(
+    &self,
+    _runner: &str,
+    _task: u64,
+    _responses: FromRunner<needy_api_proto::v1::FsTaskRequest>,
+  ) -> Result<ToRunner<needy_api_proto::v1::FsTaskResponse>> {
+    Err(ControlError::Unavailable("filesystem tasks are not supported on this service".into()))
+  }
+}
+
+// ------------------------------------------------------------------- fs
+
+/// Multiplexed workspace filesystem sessions (`FsService`).
+#[async_trait::async_trait]
+pub trait Fs: Send + Sync + 'static {
+  /// Opens a multiplexed workspace filesystem session for `caller`.
+  async fn session(
+    &self,
+    caller: Caller,
+    requests: FromRunner<needy_api_proto::v1::SessionRequest>,
+  ) -> Result<ToRunner<needy_api_proto::v1::SessionResponse>>;
 }
 
 // -------------------------------------------------------------- clients

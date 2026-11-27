@@ -13,12 +13,14 @@
 //!   container actor image.
 //! - [`identity`]: a recipe's identity files presented from the host.
 //! - [`guest`] (Linux only): the in-guest init and the exec-routing proxy.
+//! - [`fs`]: async FUSE3 workspace mount client over `FsService`.
 //! - `sshfs` (mounting on Linux only): workspace mounts over a needy exec
 //!   stream that survives lost connections, made by a VM's init or, for a
 //!   container, on the daemon's machine.
 
 pub mod contract;
 pub mod driver;
+pub mod fs;
 #[cfg(target_os = "linux")]
 pub mod guest;
 #[cfg(unix)]

@@ -16,6 +16,7 @@ bollard.workspace = true
 bytes.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
+libc.workspace = true
 needy-api-client.workspace = true
 needy-api-proto.workspace = true
 needy-common.workspace = true
@@ -34,6 +35,9 @@ uuid = { workspace = true, features = ["v5"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["poll", "socket", "term", "user"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 prost.workspace = true

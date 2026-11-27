@@ -56,6 +56,8 @@ mod clients;
 #[cfg(unix)]
 mod files;
 #[cfg(unix)]
+mod fs;
+#[cfg(unix)]
 pub mod gateway_tcp;
 #[cfg(unix)]
 mod guest;
@@ -586,6 +588,7 @@ impl Daemon {
       .runs(api.clone())
       .images(api.clone())
       .processes(api.clone())
+      .fs(api.clone())
       .guest(api.clone())
       .runners(api.clone())
       .clients(api)

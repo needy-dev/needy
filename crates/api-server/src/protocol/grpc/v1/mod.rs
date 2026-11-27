@@ -4,6 +4,7 @@
 //! only scopes what an actor may name.
 
 pub mod client;
+pub mod fs;
 pub mod guest;
 pub mod health;
 pub mod image;

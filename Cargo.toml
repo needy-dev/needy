@@ -41,6 +41,7 @@ bollard = { version = "0.21", features = ["buildkit", "time"] }
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+fuse3 = { version = "0.10", default-features = false, features = ["tokio-runtime", "unprivileged", "file-lock"] }
 flate2 = "1"
 gethostname = "1"
 glob-match = "0.2"
@@ -127,6 +128,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 devcontainer-features = { path = "crates/devcontainer-features", version = "0.0.22" }
 oci-layer = { path = "crates/oci-layer", version = "0.0.22" }

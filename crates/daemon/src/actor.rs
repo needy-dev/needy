@@ -469,8 +469,13 @@ pub(crate) async fn serve_guest(daemon: &Daemon, run: &Run, actor: &Cancellation
   let caller = Caller::Actor {
     run: run.id.clone(),
   };
-  let listener =
-    Server::new(health, caller).runs(api.clone()).processes(api.clone()).guest(api).bind(&[Listen::Unix(run.dir.join("cu.sock"))]).await?;
+  let listener = Server::new(health, caller)
+    .runs(api.clone())
+    .processes(api.clone())
+    .fs(api.clone())
+    .guest(api)
+    .bind(&[Listen::Unix(run.dir.join("cu.sock"))])
+    .await?;
   // A socket mounted into the actor keeps its file mode there, and the
   // driving program's proxy runs as the profile's user.
   // Only the holder dials this backend; the actor-facing socket is opened

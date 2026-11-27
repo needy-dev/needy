@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use needy_api_client::proto::v1::{ControlRequest, ControlResponse, TaskRequest, TaskResponse};
+use needy_api_client::proto::v1::{ControlRequest, ControlResponse, FsTaskRequest, FsTaskResponse, TaskRequest, TaskResponse};
 use needy_api_server::control::{
   Beat, ControlError, CreatedJoinToken, Credential, FromRunner, JoinTokenInfo, JoinTokenState, Joined, Joining, MintRunnerCredential,
   MintedRunnerCredential, NewJoinToken, Result, RunnerInfo, RunnerReport, RunnerStatus, Runners, ToRunner,
@@ -489,6 +489,19 @@ impl Runners for Daemon {
       return Err(control_error(error, false));
     }
     self.links.task(runner, task, responses)
+  }
+
+  async fn fs_task(&self, runner: &str, task: u64, responses: FromRunner<FsTaskRequest>) -> Result<ToRunner<FsTaskResponse>> {
+    self.static_runners.reload(&self.links);
+    if !self.static_runners.contains(runner)
+      && let Err(error) = self.state.check_active(runner, now_ms()).await
+    {
+      if matches!(error, Error::RunnerExpired(_)) {
+        self.links.close(runner);
+      }
+      return Err(control_error(error, false));
+    }
+    self.links.fs_task(runner, task, responses)
   }
 }
 

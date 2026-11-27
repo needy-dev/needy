@@ -2769,6 +2769,7 @@ impl HeldJoin {
     impl RunnerService for Held {
       type ControlStream = tokio_stream::Empty<Result<ControlResponse, Status>>;
       type TaskStream = tokio_stream::Empty<Result<TaskResponse, Status>>;
+      type FsTaskStream = tokio_stream::Empty<Result<needy_api_client::proto::v1::FsTaskResponse, Status>>;
 
       async fn join(&self, _: Request<JoinRequest>) -> Result<Response<JoinResponse>, Status> {
         self.arrived.lock().unwrap().send(()).unwrap();
@@ -2811,6 +2812,12 @@ impl HeldJoin {
         &self,
         _: Request<needy_api_client::proto::v1::RevokeRunnerCredentialRequest>,
       ) -> Result<Response<needy_api_client::proto::v1::RevokeRunnerCredentialResponse>, Status> {
+        refused()
+      }
+      async fn fs_task(
+        &self,
+        _: Request<tonic::Streaming<needy_api_client::proto::v1::FsTaskRequest>>,
+      ) -> Result<Response<Self::FsTaskStream>, Status> {
         refused()
       }
       async fn control(&self, _: Request<Streaming<ControlRequest>>) -> Result<Response<Self::ControlStream>, Status> {

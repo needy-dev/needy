@@ -121,16 +121,29 @@ async fn node_authorizer_scopes_actor_runner_to_bound_run_and_actor_methods() {
     Code::PermissionDenied
   );
   assert_eq!(bound.runners().heartbeat(HeartbeatRequest::default()).await.unwrap_err().code(), Code::PermissionDenied);
+  assert_eq!(bound.runner_fs_task(7).await.unwrap_err().kind(), needy_api_client::Kind::Denied);
+
+  // Authorized actor runner can open FsService.Session, while plain runner
+  // cannot open FsService.Session but can open RunnerService.FsTask.
+  let (tx, mut rx) = bound.fs_session().await.unwrap();
+  drop(tx);
+  assert!(rx.message().await.unwrap().is_none());
 
   // Non-bound runner or non-active/wrong run must be rejected with PermissionDenied.
   assert_eq!(wrong_run.guest().get_config(GetConfigRequest {}).await.unwrap_err().code(), Code::PermissionDenied);
   assert_eq!(wrong_runner.guest().get_config(GetConfigRequest {}).await.unwrap_err().code(), Code::PermissionDenied);
+  assert_eq!(wrong_run.fs_session().await.unwrap_err().kind(), needy_api_client::Kind::Denied);
+  assert_eq!(wrong_runner.fs_session().await.unwrap_err().kind(), needy_api_client::Kind::Denied);
 
   // Runner WITHOUT x-needy-run-id is rejected on ACTOR_METHODS, and allowed on RUNNER_METHODS.
   assert_eq!(plain_runner.guest().get_config(GetConfigRequest {}).await.unwrap_err().code(), Code::Unauthenticated);
   assert_eq!(plain_runner.runs().decide(DecideRequest::default()).await.unwrap_err().code(), Code::Unauthenticated);
+  assert_eq!(plain_runner.fs_session().await.unwrap_err().kind(), needy_api_client::Kind::Unauthenticated);
   plain_runner.runners().heartbeat(HeartbeatRequest::default()).await.unwrap();
+  let (_tx, mut fs_task) = plain_runner.runner_fs_task(7).await.unwrap();
+  assert!(fs_task.message().await.unwrap().is_some());
 
   // Revoked runner credential fails with Unauthenticated even with x-needy-run-id.
   assert_eq!(revoked_runner.guest().get_config(GetConfigRequest {}).await.unwrap_err().code(), Code::Unauthenticated);
+  assert_eq!(revoked_runner.fs_session().await.unwrap_err().kind(), needy_api_client::Kind::Unauthenticated);
 }
