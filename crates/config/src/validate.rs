@@ -123,14 +123,22 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
       }
     }
     match (mapping.mode, &mapping.from, &mapping.to) {
+      (FileMode::CopyIn, Side::Host(_), Side::Actor(_) | Side::Executor { .. }) => {}
+      (FileMode::CopyIn, _, _) => findings.push(Finding::error(format!(
+        "files.{name}: a copy-in mapping goes from `host:PATH` to `actor:PATH` or `executor:NAME:PATH` (use `mode: mount` to share files between an actor and an executor)"
+      ))),
+      (FileMode::MirrorOut, Side::Actor(_) | Side::Executor { .. }, Side::Host(_)) => {}
+      (FileMode::MirrorOut, _, _) => findings.push(Finding::error(format!(
+        "files.{name}: a mirror-out mapping goes from `actor:PATH` or `executor:NAME:PATH` to `host:PATH` (use `mode: mount` to share files between an actor and an executor)"
+      ))),
       (FileMode::Sync, Side::Host(_), Side::Actor(_)) => {}
       (FileMode::Sync, _, _) => {
         findings.push(Finding::error(format!("files.{name}: a sync mapping goes from its store `host:PATH` to `actor:PATH`")))
       }
-      (_, _, _) if !mapping.on_conflict.is_empty() => {
-        findings.push(Finding::error(format!("files.{name}: on-conflict is for `mode: sync` mappings")));
-      }
-      _ => {}
+      (FileMode::Mount, _, _) => {}
+    }
+    if mapping.mode != FileMode::Sync && !mapping.on_conflict.is_empty() {
+      findings.push(Finding::error(format!("files.{name}: on-conflict is for `mode: sync` mappings")));
     }
   }
   claimed_twice(profile, &mut findings);
