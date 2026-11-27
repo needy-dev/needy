@@ -43,11 +43,13 @@ fit:
    [Boxide](2026-11-27-boxide-protocol-spec.md), an open sandbox protocol, so
    a runner can be any implementation of it, not only needy's. Neither the cluster nor the
    runner needs an inbound route.
-4. **End to end, the daemon and the runner authenticate each other.**
-   Brokered streams carry TLS between the daemon and the runner, and the
-   daemon checks the runner's credential inside it. Both certificates come
-   from a tenant CA that a machine learns at enrolment, not from the broker,
-   so a compromised broker cannot read or forge a session (§6.4).
+4. **Authentication happens outside the session.** The broker
+   authenticates both ends of every stream and connects a daemon only to
+   the runners its bindings allow. Inside, the runner checks a per-binding
+   session token so that a misrouted stream fails at once. Boxide frames
+   are not encrypted end to end in v1. The broker's operator already
+   drives the machines it relays to (§6.4), so encrypting against it would
+   add infrastructure without adding protection.
 5. **Static profiles keep working unchanged.** A profile that does not opt
    in binds at creation exactly as now; runners that dial the daemon are one
    more source of runners, not a legacy path.
@@ -173,57 +175,50 @@ agent already read would change under it.
 ### 6.3 What a brokered stream carries
 
 A broker stream is an opaque byte stream between the daemon and a runner.
-Inside it, in order:
-
-1. TLS (§6.4).
-2. Boxide's length-prefixed binding
-   ([Boxide §3](2026-11-27-boxide-protocol-spec.md)): one session,
-   with exec and file streams multiplexed and flow-controlled end to end.
+Inside it runs Boxide's length-prefixed binding
+([Boxide §3](2026-11-27-boxide-protocol-spec.md)): one session, with exec
+and file streams multiplexed and flow-controlled end to end.
 
 The daemon is the session's client. It maps Boxide exec and file streams
 onto the same relay, routing and file-domain interception it uses for
 `RunnerService.Task` and `FsTask`, so a brokered runner looks like any other
-runner to the rest of the daemon. A runner needs protobuf, TLS and a byte
-stream, not gRPC: a device agent in TypeScript can be one. needy's own
+runner to the rest of the daemon. A runner needs protobuf and a byte
+stream, not gRPC or TLS: a device agent in TypeScript can be one. needy's own
 `needy runner serve` speaks the same session through its `exec:` stdio
 endpoint (`crates/api-client/src/command.rs`).
 
 ### 6.4 End-to-end security
 
-- **Mutual TLS inside every brokered stream, anchored in a tenant CA.**
-  Each tenant has a certificate authority. Its key is held by the
-  platform's control plane, never by a broker. TLS 1.3 runs inside the
-  stream, and each side shows a certificate the tenant CA signed:
-  - the daemon's names the tenant and the daemon
-    (*provisional* SAN: `boxide://tenant/<tenant>/daemon/<id>`), is issued
-    to it by whatever deploys it (for `rc`, a Secret), and lives for hours,
-    renewed before expiry;
-  - the runner's names the tenant and the runner
-    (`boxide://tenant/<tenant>/runner/<name>`), is issued when the machine
-    enrols with the platform, and is renewed over the platform's own API.
-- **Each side checks the other's name, not only the chain.**
-  - The runner accepts only a daemon of the tenant it enrolled with.
-  - The daemon accepts only the runner that the binding names. A broker that
-    connects the daemon to a different machine than the binding says fails
-    the handshake.
-- **Where the trust comes from.** A machine learns the tenant CA when it
-  enrols, over the platform's API and the user's session: not from the
-  broker and not per stream. A broker that is compromised can deny or delay
-  service, but cannot read or forge a session, because it holds no
-  certificate the CA signed.
-
-  The platform's control plane, which holds the CA, remains a root of
-  trust, and this spec states that as its limit. This is the model of SSH
-  certificates and of Teleport's cluster CA, without SSH (§12).
-- **Why not a pin delivered by the broker.** A fingerprint that the broker
-  hands to the runner protects only against an honest broker: one that is
-  compromised could hand over its own and sit in the middle. chisel avoids
-  this because its client learns the fingerprint out of band. The tenant CA
-  is that out-of-band channel, set up once at enrolment instead of per
-  stream.
-- **What needy must build.** TLS on the daemon's end of a broker stream and
-  on the runner's stdio endpoint (gap G4 in the `rc` integration guide), with
-  certificate-name checks as above.
+- **Three layers of authentication, all outside the session.**
+  1. *Connections.* The broker authenticates each socket that reaches it:
+     the daemon with its tenant's service credential, once per broker
+     connection; a machine with the credential its device agent already uses
+     for the platform.
+  2. *Bindings.* The broker opens a stream from a daemon only to a runner a
+     binding of that daemon allows (§5), and records it.
+  3. *Session token.* The daemon mints a credential for the runner name
+     (`MintRequest`). The broker hands it to the runner with the stream, and
+     the daemon presents it in Boxide's `Hello`. The runner refuses a session
+     whose token does not match, so a stream the broker connects to the
+     wrong runner (a bug or a race) fails at once. No certificate authority
+     or TLS is involved.
+- **Why there is no end-to-end encryption against the broker.** In the
+  intended deployment, the broker is the platform's device gateway. That
+  gateway already dispatches agent runs, tool calls and file operations to
+  the same machines through the device agent. A broker that has been
+  compromised does not need to break into a Boxide stream; it can ask the
+  device agent directly. The gateway's WebSocket TLS also ends at its edge
+  today, so the platform already sees that traffic.
+  - Encrypting Boxide against the broker would add a CA, enrolment, renewal
+    and rotation, and TLS in needy (gap G4 in the `rc` integration guide),
+    without changing who can act on the machine.
+  - This is stated as the trust model: **the broker's operator is inside
+    the trust boundary of every machine it relays to.**
+- **When that changes.** A deployment that relays through a party outside
+  that boundary (a third-party relay) needs end-to-end encryption. Boxide
+  reserves it as a future optional capability (`secure.e2e`,
+  *provisional*), for example Noise or TLS inside the binding. It is not part
+  of v1 (Boxide §3.1).
 - **The runner credential stays the daemon's to check.** A broker may ask
   for credentials (`MintRequest`) only for names under its own prefix and
   only with the executor role. The daemon refuses an actor-role mint over a
@@ -261,8 +256,8 @@ decided at run time.
 - Profiles without `binding: dynamic` behave exactly as today.
 - Runners that dial the daemon are unchanged and remain the right choice
   inside a cluster (`rc` Workspaces) and on reachable hosts.
-- A runner build that cannot do mutual TLS against the tenant CA cannot join through
-  a broker: the daemon refuses brokered streams that do not start TLS.
+- A runner build that does not check Boxide's session token cannot join
+  through a broker: the daemon offers no session without one.
 - The broker schema is versioned in `Hello`; unknown features are ignored,
   and an unsupported major version closes the connection with a reason.
 
@@ -279,8 +274,7 @@ script.
 2. **Boxide v1 core.** `proto/boxide/v1`, the frame and
    session layer, the daemon's client side, `needy runner`'s server side, and
    the conformance suite
-   ([Boxide](2026-11-27-boxide-protocol-spec.md)). TLS over a
-   stream source with mutual certificates from a test tenant CA. Cell: a runner joining through a
+   ([Boxide](2026-11-27-boxide-protocol-spec.md)). Cell: a runner joining through a
    local stdio relay and passing the suite.
 3. **Broker protocol.** `needy.v1.broker` schema, the daemon's broker client,
    leases, `MintRequest`, and a reference broker in `xtask` for tests. Cell:
@@ -361,7 +355,8 @@ all of this spec, but each part has a precedent.
 5. Whether `rc` configures broker connections for its daemons (flags and a
    credential Secret), which would replace `rc`'s per-device runner
    credentials for external executors.
-6. *Proposed in §6.4:* a tenant CA, learned at enrolment, signs daemon and
-   runner certificates for mutual TLS. Still open: where the CA key lives
-   (the platform's control plane, or a KMS behind it), certificate
-   lifetimes, and how a tenant CA is rotated without dropping sessions.
+6. *Decided 2026-11-28 (owner):* authentication stays outside the
+   session: the broker's connections and bindings, plus a per-binding
+   session token checked in `Hello`. No CA or end-to-end TLS in v1 (§6.4).
+   Still open: what a deployment with an untrusted relay should use for
+   `secure.e2e`.

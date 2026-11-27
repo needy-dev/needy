@@ -5,8 +5,9 @@
 > superseded by the proposed
 > [Dynamic executor binding and runner brokers](2026-11-27-dynamic-executor-binding-and-brokers-spec.md):
 > bindings change during a run, and the daemon dials out to a broker such
-> as the platform's device gateway, so no cluster ingress is needed. The
-> text below is kept as written.
+> as the platform's device gateway, so no cluster ingress is needed. End-to-end
+> TLS through the gateway (§4, D2) is not planned either: authentication stays
+> outside the session (broker spec §6.4). The text below is kept as written.
 
 Status: **proposed design for owner review**, 2026-11-27. Nothing here is
 approved; names marked *(provisional)* are not stable. It extends the

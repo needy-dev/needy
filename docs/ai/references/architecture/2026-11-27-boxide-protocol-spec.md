@@ -64,7 +64,7 @@ certificate-based trust for free. But:
 - an "SSH server" on users' machines invites the wrong expectations.
 
 Boxide keeps SSH's ideas instead: per-stream windows (§4), extension
-negotiation (§8) and certificate-based identities (§3.1).
+negotiation (§8), and identity checked before the session starts (§3.1).
 
 ## 3. Layers
 
@@ -85,25 +85,23 @@ needs only protobuf encoding and a WebSocket, not a gRPC stack.
 
 ### 3.1 Securing a binding
 
-Boxide does not encrypt or authenticate frames itself; the binding does.
+Boxide neither encrypts nor authenticates peers by itself; that happens
+outside the session.
 
-- **Direct transports:** a binding over a direct path (a local socket, a
-  VM's vsock, a gRPC connection the peers dial themselves) uses that
-  transport's own security.
-- **Relayed paths:** a binding that crosses a relay the peers do not both
-  control MUST run inside TLS 1.3 with mutual certificate authentication.
-  - The certificates carry the peers' identities as URI SANs: the server
-    (the sandbox) is `boxide://tenant/<tenant>/runner/<name>`, and the client
-    `boxide://tenant/<tenant>/daemon/<id>`.
-  - Each side checks the other's name against the session it expects, not
-    only the chain.
-- **Trust anchors** (which CA signs those certificates, and how a machine
-  learns it) are a deployment decision outside Boxide. One deployment is
-  described in the
-  [broker spec §6.4](2026-11-27-dynamic-executor-binding-and-brokers-spec.md):
-  a tenant CA learned at enrolment.
-- **No user identity on the wire.** Who may use a sandbox is decided before
-  the session, by whatever issues certificates and opens streams.
+- **Authentication and authorization belong to whatever opens the
+  stream.** A relay authenticates both ends of each connection and connects
+  only the peers its policy allows. A direct transport uses its own means.
+  Boxide carries no user identity.
+- **Session token.** `Hello` carries an opaque `token` that the server
+  checks before it sends `Welcome`. The system that opens streams issues it
+  for one pairing of client and server, so a stream connected to the wrong
+  server fails at once. It guards against misrouting, not against the relay.
+- **Confidentiality** comes from the transport: for example TLS between
+  each peer and a relay. In v1 a relay can read frames. Deployments whose
+  relay is already trusted to act on the server need nothing more.
+- **End-to-end encryption** for relays outside that trust is reserved as a
+  future optional capability, `secure.e2e` *(provisional)*, for example Noise
+  or TLS inside the binding. It is not part of v1.
 
 ## 4. Session and frames *(provisional shapes)*
 
@@ -128,8 +126,8 @@ message Frame {
 
 - **Handshake:**
   - `Hello` carries the protocol versions the client speaks (`major.minor`),
-    its implementation's name and version, the capabilities it wants and the
-    extensions it understands.
+    its implementation's name and version, the capabilities it wants, the
+    extensions it understands, and the session `token` (§3.1).
   - `Welcome` returns the version chosen, the capabilities granted (the
     intersection) and the server's implementation.
   - A server with no common major version answers with `Close` and a reason.
