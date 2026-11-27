@@ -4,12 +4,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use needy_api_proto::v1::{
-  FsAttr, FsAttrReply, FsData, FsError, FsForceUnmount, FsPong, SessionRequest, SessionResponse, session_request, session_response,
+  FsAttr, FsAttrReply, FsData, FsError, FsForceUnmount, FsLockMode, FsMount, FsMounted, FsPong, SessionRequest, SessionResponse,
+  session_request, session_response,
 };
 use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::client::{EIO, FsRpcClient};
+use super::client::{EIO, FsRpcClient, SessionConnector, SessionResponseStream};
 use super::neg_cache::NegativeCache;
 use super::prefetch::{BACKWARD_SEEK_WINDOW, FORWARD_SKIP_TOLERANCE, INITIAL_REQUEST_SIZE, MAX_REQUEST_SIZE, Prefetcher, ReadSource};
 use super::write_behind::{WriteBehind, WriteSink};
@@ -398,6 +399,206 @@ async fn rpc_client_cancels_on_force_unmount() {
   assert_eq!(err, EIO);
   assert!(cancel.is_cancelled());
   assert_eq!(client.force_unmount_reason().as_deref(), Some("run stopped"));
+}
+
+fn sample_mount_req() -> FsMount {
+  FsMount {
+    executor: "runner-x".into(),
+    source: "/workspace".into(),
+    target: "/home/actor/workspace".into(),
+    writable: true,
+    lock_mode: FsLockMode::Local.into(),
+  }
+}
+
+// ROOT CAUSE:
+//
+// If the runner's transport dropped transiently (e.g. idle-proxy cut),
+// `FsRpcClient` cancelled its mount token immediately on stream EOF instead of
+// reconnecting within the runner grace window.
+//
+// Before the fix, any unexpected stream close unmounted FUSE3 immediately.
+// The fix fails in-flight RPCs with EIO, reconnects via the connector, replays
+// `FsMount`, and resumes serving without cancelling the mount.
+#[tokio::test]
+async fn rpc_client_reconnects_after_transient_disconnect_and_replays_mount() {
+  let (req_tx1, mut req_rx1) = mpsc::channel::<SessionRequest>(8);
+  let (resp_tx1, resp_rx1) = mpsc::channel::<Result<SessionResponse, tonic::Status>>(8);
+
+  let mount_req = sample_mount_req();
+  let expected_mount = mount_req.clone();
+  let attempts = Arc::new(AtomicUsize::new(0));
+  let replayed_mount = Arc::new(Mutex::new(None::<FsMount>));
+
+  let attempts_for_conn = Arc::clone(&attempts);
+  let replayed_for_conn = Arc::clone(&replayed_mount);
+  let connector: SessionConnector = Arc::new(move || {
+    let attempt = attempts_for_conn.fetch_add(1, Ordering::SeqCst);
+    let replayed = Arc::clone(&replayed_for_conn);
+    Box::pin(async move {
+      let (tx, mut rx) = mpsc::channel::<SessionRequest>(8);
+      let (resp_tx, resp_rx) = mpsc::channel::<Result<SessionResponse, tonic::Status>>(8);
+
+      tokio::spawn(async move {
+        let first = rx.recv().await.unwrap();
+        if attempt == 0 {
+          // Simulate daemon returning EIO to FsMount while the runner is still
+          // reconnecting.
+          let _ = resp_tx
+            .send(Ok(SessionResponse {
+              id: first.id,
+              body: Some(session_response::Body::Error(FsError {
+                errno: EIO,
+                message: "runner not connected".into(),
+              })),
+            }))
+            .await;
+          return;
+        }
+
+        match first.body {
+          Some(session_request::Body::Mount(m)) => {
+            *replayed.lock().unwrap() = Some(m);
+            resp_tx
+              .send(Ok(SessionResponse {
+                id: first.id,
+                body: Some(session_response::Body::Mounted(FsMounted {
+                  writable: true,
+                  lock_mode: FsLockMode::Local.into(),
+                  ..Default::default()
+                })),
+              }))
+              .await
+              .unwrap();
+          }
+          other => panic!("expected replayed FsMount, got {other:?}"),
+        }
+
+        while let Some(req) = rx.recv().await {
+          let body = match req.body.unwrap() {
+            session_request::Body::Ping(p) => session_response::Body::Pong(FsPong {
+              timestamp_ms: p.timestamp_ms,
+            }),
+            session_request::Body::Getattr(g) => session_response::Body::Attr(FsAttrReply {
+              attr: Some(FsAttr {
+                ino: g.ino,
+                size: 77,
+                ..Default::default()
+              }),
+            }),
+            _ => session_response::Body::Error(FsError {
+              errno: EIO,
+              message: "unexpected".into(),
+            }),
+          };
+          if resp_tx
+            .send(Ok(SessionResponse {
+              id: req.id,
+              body: Some(body),
+            }))
+            .await
+            .is_err()
+          {
+            break;
+          }
+        }
+      });
+
+      let stream: SessionResponseStream = Box::pin(ReceiverStream::new(resp_rx));
+      Ok((tx, stream))
+    })
+  });
+
+  let client = FsRpcClient::with_connector(req_tx1, ReceiverStream::new(resp_rx1), connector, mount_req, Duration::from_secs(5));
+  let cancel = client.cancelled();
+
+  // Receive the initial request and drop the first stream without replying.
+  tokio::spawn(async move {
+    let _req = req_rx1.recv().await.unwrap();
+    drop(resp_tx1);
+  });
+
+  // In-flight call fails with EIO, but the mount is NOT cancelled.
+  let err = client.ping(1).await.unwrap_err();
+  assert_eq!(err, EIO);
+  assert!(!cancel.is_cancelled());
+
+  // Subsequent calls wait through reconnect and succeed on the new session.
+  let pong = client.ping(999).await.unwrap();
+  assert_eq!(pong.timestamp_ms, 999);
+  let attr = client.getattr(1, None).await.unwrap();
+  assert_eq!(attr.ino, 1);
+  assert_eq!(attr.size, 77);
+
+  assert!(!cancel.is_cancelled());
+  assert_eq!(client.session_epoch(), 1);
+  assert_eq!(attempts.load(Ordering::SeqCst), 2);
+  assert_eq!(replayed_mount.lock().unwrap().as_ref(), Some(&expected_mount));
+}
+
+#[tokio::test]
+async fn rpc_client_with_connector_cancels_immediately_on_force_unmount() {
+  let (req_tx, mut req_rx) = mpsc::channel::<SessionRequest>(8);
+  let (resp_tx, resp_rx) = mpsc::channel::<Result<SessionResponse, tonic::Status>>(8);
+
+  let attempts = Arc::new(AtomicUsize::new(0));
+  let attempts_for_conn = Arc::clone(&attempts);
+  let connector: SessionConnector = Arc::new(move || {
+    attempts_for_conn.fetch_add(1, Ordering::SeqCst);
+    Box::pin(async move { Err("connector must not be called on force unmount".into()) })
+  });
+
+  let client = FsRpcClient::with_connector(req_tx, ReceiverStream::new(resp_rx), connector, sample_mount_req(), Duration::from_secs(5));
+  let cancel = client.cancelled();
+
+  tokio::spawn(async move {
+    let _req = req_rx.recv().await.unwrap();
+    resp_tx
+      .send(Ok(SessionResponse {
+        id: 0,
+        body: Some(session_response::Body::ForceUnmount(FsForceUnmount {
+          reason: "run stopped".into(),
+        })),
+      }))
+      .await
+      .unwrap();
+  });
+
+  let err = client.ping(1).await.unwrap_err();
+  assert_eq!(err, EIO);
+  assert!(cancel.is_cancelled());
+  assert_eq!(client.force_unmount_reason().as_deref(), Some("run stopped"));
+  assert_eq!(attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn rpc_client_cancels_when_reconnect_window_exhausted() {
+  let (req_tx, mut req_rx) = mpsc::channel::<SessionRequest>(8);
+  let (resp_tx, resp_rx) = mpsc::channel::<Result<SessionResponse, tonic::Status>>(8);
+
+  let attempts = Arc::new(AtomicUsize::new(0));
+  let attempts_for_conn = Arc::clone(&attempts);
+  let connector: SessionConnector = Arc::new(move || {
+    attempts_for_conn.fetch_add(1, Ordering::SeqCst);
+    Box::pin(async move { Err("runner unavailable".into()) })
+  });
+
+  let client = FsRpcClient::with_connector(req_tx, ReceiverStream::new(resp_rx), connector, sample_mount_req(), Duration::from_millis(120));
+  let cancel = client.cancelled();
+
+  tokio::spawn(async move {
+    let _req = req_rx.recv().await.unwrap();
+    drop(resp_tx);
+  });
+
+  let err = client.ping(1).await.unwrap_err();
+  assert_eq!(err, EIO);
+
+  // Wait for the reconnect window to expire and cancel the mount.
+  tokio::time::timeout(Duration::from_secs(2), cancel.cancelled()).await.expect("expected cancellation after reconnect window");
+  assert!(client.is_cancelled());
+  assert!(attempts.load(Ordering::SeqCst) >= 1);
+  assert_eq!(client.ping(2).await.unwrap_err(), EIO);
 }
 
 // ---------------------------------------------------------------------------
