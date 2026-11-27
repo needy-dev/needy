@@ -1,5 +1,13 @@
 # An agent platform's execution mesh over needy (design)
 
+> **Revision notice (2026-11-27):** the data plane in §4 (D1, a cluster
+> byte-stream ingress) and the static executor binding assumed in §3 A are
+> superseded by the proposed
+> [Dynamic executor binding and runner brokers](2026-11-27-dynamic-executor-binding-and-brokers-spec.md):
+> bindings change during a run, and the daemon dials out to a broker such
+> as the platform's device gateway, so no cluster ingress is needed. The
+> text below is kept as written.
+
 Status: **proposed design for owner review**, 2026-11-27. Nothing here is
 approved; names marked *(provisional)* are not stable. It extends the
 proposed
