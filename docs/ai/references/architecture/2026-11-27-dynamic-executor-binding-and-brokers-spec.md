@@ -183,9 +183,9 @@ The daemon is the session's client. It maps Boxide exec and file streams
 onto the same relay, routing and file-domain interception it uses for
 `RunnerService.Task` and `FsTask`, so a brokered runner looks like any other
 runner to the rest of the daemon. A runner needs protobuf and a byte
-stream, not gRPC or TLS: a device agent in TypeScript can be one. needy's own
-`needy runner serve` speaks the same session through its `exec:` stdio
-endpoint (`crates/api-client/src/command.rs`).
+stream, not gRPC or TLS: a device agent in TypeScript can be one. needy's
+own runner does not speak Boxide; it keeps dialing the daemon with its gRPC
+`Task` and `FsTask` streams (owner, 2026-11-28).
 
 ### 6.4 End-to-end security
 
@@ -272,9 +272,9 @@ script.
    two native runners, rebind mid-run, check the trace and the drained
    instance.
 2. **Boxide v1 core.** `proto/boxide/v1`, the frame and
-   session layer, the daemon's client side, `needy runner`'s server side, and
+   session layer, the daemon's client side, a minimal reference server, and
    the conformance suite
-   ([Boxide](2026-11-27-boxide-protocol-spec.md)). Cell: a runner joining through a
+   ([Boxide](2026-11-27-boxide-protocol-spec.md)). Cell: the daemon running a session against the reference server through a
    local stdio relay and passing the suite.
 3. **Broker protocol.** `needy.v1.broker` schema, the daemon's broker client,
    leases, `MintRequest`, and a reference broker in `xtask` for tests. Cell:

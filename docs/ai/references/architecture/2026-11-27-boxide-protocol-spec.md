@@ -271,24 +271,26 @@ free of them.
   for every server, and capability cases only for what the server grants.
 - It lives in `xtask` at first (`cargo xtask boxide-conformance --server
   'CMD …'`, *provisional*) and moves with the protocol.
-- needy's runner is the first server to pass it; any other implementation
-  (for example one in TypeScript) runs the same suite in its own CI.
+- The suite ships with a minimal reference server in `xtask`, used only to
+  test the suite and needy's client. The first real server is a device
+  agent's TypeScript implementation, which runs the same suite in its own CI.
 
 ## 12. needy's use of it
 
-- needy's daemon is a client, and its runner a server, behind the `gRPC`
-  binding. The broker spec carries the same frames over WebSockets.
+- needy's daemon is a Boxide client, over the length-prefixed binding inside
+  broker streams (broker spec §6.3).
 - needy's existing `RunnerService.Task`, `RunnerService.FsTask` and
-  `FsService.Session` stay as they are until a slice migrates them to
-  `boxide.v1`. The migration order is open question 3.
+  `FsService.Session` stay as they are. Boxide is used for brokered
+  executors only; needy's runner is not migrated (owner, 2026-11-28).
+  Revisit only if keeping two paths becomes a cost.
 
 ## 13. Open questions
 
 1. *Decided 2026-11-27:* the protocol is Boxide, and its first package is
    `boxide.v1`.
 2. Whether to define a JSON mapping as well (debuggability vs. byte payloads).
-3. Migration: move needy's runner streams to `boxide.v1` first, or add it
-   only for brokered executors and converge later.
+3. *Decided 2026-11-28 (owner):* needy's runner keeps its gRPC `Task` and
+   `FsTask`; Boxide serves brokered executors only (§12).
 4. Windows: which semantics a Windows server must provide to pass the core
    suite (POSIX rename over an open file is not available through
    `MoveFileExW`).
