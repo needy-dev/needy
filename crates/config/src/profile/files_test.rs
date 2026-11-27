@@ -145,3 +145,79 @@ files:
 
   assert_eq!(found, ["error: files.pi and files.login both claim /home/agent/.pi/agent in the actor"]);
 }
+
+// ROOT CAUSE:
+//
+// If a profile defined a `copy-in` or `mirror-out` mapping between `actor:`
+// and `executor:` (or without `host:` on the required side),
+// `validate::profile` accepted it and `needy-daemon`'s file transfer silently
+// skipped it at runtime with no error and no files transferred.
+//
+// Before the fix, `validate::profile` only checked `mode: sync` sides.
+// The fix rejects invalid `copy-in` and `mirror-out` sides during validation
+// and directs callers to `mode: mount` for actor-executor sharing.
+#[test]
+fn copy_in_requires_host_source_and_actor_or_executor_destination() {
+  let valid = findings(
+    r#"
+actor: { driver: linux-firecracker }
+executors: { build: {} }
+files:
+  to-actor: { mode: copy-in, from: "host:/src", to: "actor:~/dst" }
+  to-exec: { mode: copy-in, from: "host:/src", to: "executor:build:/dst" }
+"#,
+  );
+  assert!(valid.is_empty(), "{valid:?}");
+
+  let invalid = findings(
+    r#"
+actor: { driver: linux-firecracker }
+executors: { build: {} }
+files:
+  exec-to-actor: { mode: copy-in, from: "executor:build:/src", to: "actor:~/dst" }
+  actor-to-exec: { mode: copy-in, from: "actor:~/src", to: "executor:build:/dst" }
+  host-to-host: { mode: copy-in, from: "host:/src", to: "host:/dst" }
+"#,
+  );
+  assert_eq!(
+    invalid,
+    [
+      "error: files.actor-to-exec: a copy-in mapping goes from `host:PATH` to `actor:PATH` or `executor:NAME:PATH` (use `mode: mount` to share files between an actor and an executor)",
+      "error: files.exec-to-actor: a copy-in mapping goes from `host:PATH` to `actor:PATH` or `executor:NAME:PATH` (use `mode: mount` to share files between an actor and an executor)",
+      "error: files.host-to-host: a copy-in mapping goes from `host:PATH` to `actor:PATH` or `executor:NAME:PATH` (use `mode: mount` to share files between an actor and an executor)",
+    ]
+  );
+}
+
+#[test]
+fn mirror_out_requires_actor_or_executor_source_and_host_destination() {
+  let valid = findings(
+    r#"
+actor: { driver: linux-firecracker }
+executors: { build: {} }
+files:
+  from-actor: { mode: mirror-out, from: "actor:~/out", to: "host:/dst" }
+  from-exec: { mode: mirror-out, from: "executor:build:/out", to: "host:/dst" }
+"#,
+  );
+  assert!(valid.is_empty(), "{valid:?}");
+
+  let invalid = findings(
+    r#"
+actor: { driver: linux-firecracker }
+executors: { build: {} }
+files:
+  actor-to-exec: { mode: mirror-out, from: "actor:~/out", to: "executor:build:/dst" }
+  exec-to-actor: { mode: mirror-out, from: "executor:build:/out", to: "actor:~/dst" }
+  host-to-host: { mode: mirror-out, from: "host:/out", to: "host:/dst" }
+"#,
+  );
+  assert_eq!(
+    invalid,
+    [
+      "error: files.actor-to-exec: a mirror-out mapping goes from `actor:PATH` or `executor:NAME:PATH` to `host:PATH` (use `mode: mount` to share files between an actor and an executor)",
+      "error: files.exec-to-actor: a mirror-out mapping goes from `actor:PATH` or `executor:NAME:PATH` to `host:PATH` (use `mode: mount` to share files between an actor and an executor)",
+      "error: files.host-to-host: a mirror-out mapping goes from `actor:PATH` or `executor:NAME:PATH` to `host:PATH` (use `mode: mount` to share files between an actor and an executor)",
+    ]
+  );
+}
