@@ -299,7 +299,9 @@ cargo xtask e2e         # end-to-end matrix on this host
 
 See [Development and architecture](docs/guides/development.md) for the crate
 map, extension points, `cargo xtask e2e` options, and `apps/docs` banner
-rendering.
+rendering, and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidelines and
+the release process (all releases are published as pre-releases first until
+release artifacts finish building, then promoted to stable).
 
 ## Acknowledgements
 

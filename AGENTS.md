@@ -445,6 +445,20 @@ daemon tests to hit `EMFILE` and hang.
 - If private data is already on GitHub, stop and tell the user. Do not rewrite
   pushed history without approval.
 
+## Releases
+
+- Every release must be published as a **pre-release** first
+  (`gh release create vX.Y.Z --prerelease ...`) and promoted to a stable release
+  (`gh release edit vX.Y.Z --prerelease=false`) only after `.github/workflows/release.yml`
+  finishes uploading all release assets and pushing GHCR images.
+- Never publish a tag directly as a stable release: doing so fires
+  `release: [published]` and `release: [released]` simultaneously, which moves
+  `releases/latest` before binaries exist and causes
+  `.github/workflows/update-homebrew.yml` to fail immediately because the macOS
+  `.sha256` checksums are not uploaded yet.
+- See [`CONTRIBUTING.md`](CONTRIBUTING.md#releasing) for the full release
+  procedure and recovery steps.
+
 ## Commits
 
 - Use `<type>(<scope>): <message>`, for example `feat(needy): ...`.
