@@ -806,5 +806,67 @@ fn dispatch_sync(inner: &HostFsInner, body: v1::session_request::Body) -> Result
       b.setlock(r.ino, r.fh, r.lock_owner, range, r.sleep)?;
       Ok(Resp::Ok(v1::FsOk {}))
     }
+    Req::PrefetchTree(r) => {
+      const MAX_DEPTH_CAP: usize = 8;
+      const MAX_DIRS_CAP: usize = 4096;
+      const MAX_TOTAL_ENTRIES: usize = 20_000;
+
+      let max_depth = (r.max_depth as usize).min(MAX_DEPTH_CAP);
+      let max_dirs = if r.max_dirs == 0 {
+        256
+      } else {
+        (r.max_dirs as usize).min(MAX_DIRS_CAP)
+      };
+      let skip: std::collections::HashSet<&str> = r.skip_names.iter().map(String::as_str).collect();
+      let mut queue = std::collections::VecDeque::new();
+      queue.push_back((r.ino, 0usize));
+
+      let mut dirs = Vec::new();
+      let mut total_entries = 0usize;
+      while let Some((dir_ino, depth)) = queue.pop_front() {
+        if dirs.len() >= max_dirs || total_entries >= MAX_TOTAL_ENTRIES {
+          break;
+        }
+        let mut all_entries = Vec::new();
+        let mut offset = 0u64;
+        let mut failed = false;
+        loop {
+          match b.readdirplus(dir_ino, offset, DEFAULT_READDIR_MAX, generation) {
+            Ok((batch, eof)) => {
+              let last_offset = batch.last().map(|e| e.offset);
+              all_entries.extend(batch);
+              if eof {
+                break;
+              }
+              match last_offset {
+                Some(next) if next > offset => offset = next,
+                _ => break,
+              }
+            }
+            Err(_) => {
+              failed = true;
+              break;
+            }
+          }
+        }
+        if failed {
+          continue;
+        }
+        if depth < max_depth {
+          for entry in &all_entries {
+            let is_dir = entry.attr.as_ref().and_then(|a| v1::FsFileType::try_from(a.kind).ok()) == Some(v1::FsFileType::Directory);
+            if is_dir && entry.ino > ROOT_INO && !skip.contains(entry.name.as_str()) {
+              queue.push_back((entry.ino, depth + 1));
+            }
+          }
+        }
+        total_entries += all_entries.len();
+        dirs.push(v1::FsPrefetchDir {
+          ino: dir_ino,
+          entries: all_entries,
+        });
+      }
+      Ok(Resp::PrefetchTree(v1::FsPrefetchTreeReply { dirs }))
+    }
   }
 }

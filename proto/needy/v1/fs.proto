@@ -318,6 +318,27 @@ message FsAttrReply {
 
 message FsOk {}
 
+// Batched BFS metadata prefetch starting from `ino`, returning full directory
+// listings for up to `max_dirs` directories up to `max_depth` levels deep
+// (0 = `ino` only) in a single round trip.
+message FsPrefetchTree {
+  uint64 ino = 1;
+  uint32 max_depth = 2;
+  uint32 max_dirs = 3;
+  // Directory names omitted from recursive descent (still returned as entries
+  // in their parent listing).
+  repeated string skip_names = 4;
+}
+
+message FsPrefetchDir {
+  uint64 ino = 1;
+  repeated FsDirEntry entries = 2;
+}
+
+message FsPrefetchTreeReply {
+  repeated FsPrefetchDir dirs = 1;
+}
+
 message SessionRequest {
   uint64 id = 1;
   oneof body {
@@ -346,6 +367,7 @@ message SessionRequest {
     FsSetLock setlock = 24;
     FsPing ping = 25;
     FsCreateAndWrite create_and_write = 26;
+    FsPrefetchTree prefetch_tree = 27;
   }
 }
 
@@ -367,5 +389,6 @@ message SessionResponse {
     FsLockReply lock = 14;
     FsPong pong = 15;
     FsForceUnmount force_unmount = 16;
+    FsPrefetchTreeReply prefetch_tree = 17;
   }
 }

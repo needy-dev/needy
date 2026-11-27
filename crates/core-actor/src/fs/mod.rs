@@ -29,6 +29,17 @@ pub use crate::sshfs::Mount;
 /// - `"sshfs"`: use `sshfs` directly.
 pub const FS_BACKEND_ENV: &str = "NEEDY_FS_BACKEND";
 
+/// Optional environment variable overriding the FUSE3 metadata cache TTL
+/// (`attr_ttl`, `entry_ttl`, and negative-lookup cache TTL) in seconds.
+pub const FS_TTL_ENV: &str = "NEEDY_FS_TTL";
+
+/// Parses a positive integer seconds value from `NEEDY_FS_TTL`.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn parse_ttl_secs(raw: Option<&str>) -> Option<Duration> {
+  let secs: u64 = raw?.trim().parse().ok()?;
+  (secs > 0).then(|| Duration::from_secs(secs))
+}
+
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FsBackend {
@@ -95,11 +106,11 @@ pub struct MountConfig {
 
 impl MountConfig {
   /// Default kernel attribute cache TTL.
-  pub const DEFAULT_ATTR_TTL: Duration = Duration::from_secs(1);
+  pub const DEFAULT_ATTR_TTL: Duration = Duration::from_secs(15);
   /// Default kernel directory entry cache TTL.
-  pub const DEFAULT_ENTRY_TTL: Duration = Duration::from_secs(1);
+  pub const DEFAULT_ENTRY_TTL: Duration = Duration::from_secs(15);
 
-  /// Creates a `MountConfig` with default 1-second attribute/entry TTLs and
+  /// Creates a `MountConfig` with default 15-second attribute/entry TTLs and
   /// local kernel VFS locking.
   pub fn new(target: impl Into<String>, executor: impl Into<String>, source: impl Into<String>, writable: bool, uid: u32, gid: u32) -> Self {
     Self {
@@ -195,7 +206,11 @@ pub async fn mount_workspace(client: &needy_api_client::Client, m: &crate::sshfs
     return crate::sshfs::mount(client, m, uid, gid).await;
   }
 
-  let config = MountConfig::new(m.target.clone(), m.executor.clone(), m.source.clone(), m.writable, uid, gid);
+  let mut config = MountConfig::new(m.target.clone(), m.executor.clone(), m.source.clone(), m.writable, uid, gid);
+  if let Some(ttl) = parse_ttl_secs(std::env::var(FS_TTL_ENV).ok().as_deref()) {
+    config.attr_ttl = ttl;
+    config.entry_ttl = ttl;
+  }
   match mount(client, config).await {
     Ok(()) => Ok(()),
     Err(err) if backend == FsBackend::Auto && is_unimplemented(&err) => {

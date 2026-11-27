@@ -316,6 +316,28 @@ impl FsRpcClient {
     }
   }
 
+  /// Prefetches a bounded BFS subtree of directory listings in one RPC.
+  pub async fn prefetch_tree(
+    &self,
+    ino: u64,
+    max_depth: u32,
+    max_dirs: u32,
+    skip_names: Vec<String>,
+  ) -> Result<needy_api_proto::v1::FsPrefetchTreeReply, i32> {
+    match self
+      .call(session_request::Body::PrefetchTree(needy_api_proto::v1::FsPrefetchTree {
+        ino,
+        max_depth,
+        max_dirs,
+        skip_names,
+      }))
+      .await?
+    {
+      session_response::Body::PrefetchTree(reply) => Ok(reply),
+      _ => Err(EPROTO),
+    }
+  }
+
   /// Opens an existing file inode.
   pub async fn open(&self, ino: u64, flags: u32, writeback: bool) -> Result<FsOpened, i32> {
     match self

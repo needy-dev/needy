@@ -145,9 +145,26 @@ pub(crate) struct UnixFs {
   next_fh: AtomicU64,
 }
 
+/// Returns a directory-FD cache capacity that stays safely below the current
+/// process's `RLIMIT_NOFILE` soft limit (e.g. 256 by default on macOS).
+fn effective_dir_fd_cache_cap() -> usize {
+  let mut lim = libc::rlimit {
+    rlim_cur: 0,
+    rlim_max: 0,
+  };
+  // SAFETY: `lim` is a valid out-pointer to `libc::rlimit`.
+  let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) };
+  if rc == 0 && lim.rlim_cur != libc::RLIM_INFINITY && lim.rlim_cur > 0 {
+    let budget = usize::try_from(lim.rlim_cur / 2).unwrap_or(DIR_FD_CACHE_CAP);
+    budget.clamp(16, DIR_FD_CACHE_CAP)
+  } else {
+    DIR_FD_CACHE_CAP
+  }
+}
+
 impl UnixFs {
   pub(crate) fn open(root: &Path) -> Result<Self, v1::FsError> {
-    Self::open_with_dir_cache_cap(root, DIR_FD_CACHE_CAP)
+    Self::open_with_dir_cache_cap(root, effective_dir_fd_cache_cap())
   }
 
   fn open_with_dir_cache_cap(root: &Path, dir_fd_cache_cap: usize) -> Result<Self, v1::FsError> {

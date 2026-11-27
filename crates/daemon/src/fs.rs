@@ -86,6 +86,7 @@ enum PendingOp {
   ReadDirPlus {
     dir_ino: u64,
   },
+  PrefetchTree,
   Rename {
     parent: u64,
     name: String,
@@ -265,6 +266,9 @@ impl PathTable {
       session_request::Body::Readdirplus(r) => {
         self.pending.insert(req.id, PendingOp::ReadDirPlus { dir_ino: r.ino });
       }
+      session_request::Body::PrefetchTree(_) => {
+        self.pending.insert(req.id, PendingOp::PrefetchTree);
+      }
       session_request::Body::Rename(r) => {
         self.pending.insert(
           req.id,
@@ -317,6 +321,18 @@ impl PathTable {
               continue;
             }
             self.record_inode(entry.ino, join_rel(&dir_rel, &entry.name));
+          }
+        }
+      }
+      (PendingOp::PrefetchTree, session_response::Body::PrefetchTree(r)) => {
+        for dir in &r.dirs {
+          if let Some(dir_rel) = self.inodes.get(&dir.ino).map(|p| p.rel_path.clone()) {
+            for entry in &dir.entries {
+              if entry.name == "." || entry.name == ".." {
+                continue;
+              }
+              self.record_inode(entry.ino, join_rel(&dir_rel, &entry.name));
+            }
           }
         }
       }

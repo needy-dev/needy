@@ -20,6 +20,16 @@ use super::write_behind::{WriteBehind, WriteSink};
 // ---------------------------------------------------------------------------
 
 #[test]
+fn fs_ttl_env_parses_positive_seconds_only() {
+  assert_eq!(super::parse_ttl_secs(None), None);
+  assert_eq!(super::parse_ttl_secs(Some("")), None);
+  assert_eq!(super::parse_ttl_secs(Some("0")), None);
+  assert_eq!(super::parse_ttl_secs(Some("abc")), None);
+  assert_eq!(super::parse_ttl_secs(Some("15")), Some(Duration::from_secs(15)));
+  assert_eq!(super::parse_ttl_secs(Some(" 30 ")), Some(Duration::from_secs(30)));
+}
+
+#[test]
 fn neg_cache_expiry_and_invalidation() {
   let cache = NegativeCache::new(16, Duration::from_millis(40));
   cache.insert(1, "missing.txt");

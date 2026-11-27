@@ -587,11 +587,39 @@ pub struct FsAttrReply {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FsOk {
 }
+/// Batched BFS metadata prefetch starting from `ino`, returning full directory
+/// listings for up to `max_dirs` directories up to `max_depth` levels deep
+/// (0 = `ino` only) in a single round trip.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsPrefetchTree {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint32, tag="2")]
+    pub max_depth: u32,
+    #[prost(uint32, tag="3")]
+    pub max_dirs: u32,
+    /// Directory names omitted from recursive descent (still returned as entries
+    /// in their parent listing).
+    #[prost(string, repeated, tag="4")]
+    pub skip_names: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FsPrefetchDir {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(message, repeated, tag="2")]
+    pub entries: ::prost::alloc::vec::Vec<FsDirEntry>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FsPrefetchTreeReply {
+    #[prost(message, repeated, tag="1")]
+    pub dirs: ::prost::alloc::vec::Vec<FsPrefetchDir>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SessionRequest {
     #[prost(uint64, tag="1")]
     pub id: u64,
-    #[prost(oneof="session_request::Body", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26")]
+    #[prost(oneof="session_request::Body", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27")]
     pub body: ::core::option::Option<session_request::Body>,
 }
 /// Nested message and enum types in `SessionRequest`.
@@ -648,13 +676,15 @@ pub mod session_request {
         Ping(super::FsPing),
         #[prost(message, tag="26")]
         CreateAndWrite(super::FsCreateAndWrite),
+        #[prost(message, tag="27")]
+        PrefetchTree(super::FsPrefetchTree),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SessionResponse {
     #[prost(uint64, tag="1")]
     pub id: u64,
-    #[prost(oneof="session_response::Body", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16")]
+    #[prost(oneof="session_response::Body", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17")]
     pub body: ::core::option::Option<session_response::Body>,
 }
 /// Nested message and enum types in `SessionResponse`.
@@ -691,6 +721,8 @@ pub mod session_response {
         Pong(super::FsPong),
         #[prost(message, tag="16")]
         ForceUnmount(super::FsForceUnmount),
+        #[prost(message, tag="17")]
+        PrefetchTree(super::FsPrefetchTreeReply),
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
