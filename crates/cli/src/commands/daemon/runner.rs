@@ -200,6 +200,7 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
       "Runner:", "Control daemon:", "Local capabilities:"
     ))?;
   } else {
+    super::raise_nofile_limit();
     // TODO(runner-progress): persistent serve has no connection-state callback;
     // add waiting feedback only with an owner-approved callback that separates
     // connection/reconnection from active serving, without covering its lifetime.

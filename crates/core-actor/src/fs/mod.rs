@@ -89,6 +89,8 @@ pub struct MountConfig {
   pub attr_ttl: Duration,
   /// Kernel directory entry cache TTL.
   pub entry_ttl: Duration,
+  /// Whether the remote executor filesystem is case-insensitive (set from `FsMounted`).
+  pub case_insensitive: bool,
 }
 
 impl MountConfig {
@@ -110,6 +112,7 @@ impl MountConfig {
       gid,
       attr_ttl: Self::DEFAULT_ATTR_TTL,
       entry_ttl: Self::DEFAULT_ENTRY_TTL,
+      case_insensitive: false,
     }
   }
 }

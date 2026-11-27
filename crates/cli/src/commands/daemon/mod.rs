@@ -142,6 +142,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     #[cfg(not(unix))]
     Command::Holder(_) => anyhow::bail!("runtime holders require Unix"),
     Command::Executor(args) => {
+      raise_nofile_limit();
       let token = match args.token_file {
         Some(path) => Some(crate::configuration::read_secret(&path)?),
         None => None,
@@ -168,6 +169,7 @@ async fn serve(_: ServeArgs, _: &Context) -> Result<i32> {
 
 #[cfg(unix)]
 async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
+  raise_nofile_limit();
   let paths = ctx.paths()?;
   let mut effective = needy_config::global::Config {
     daemon: ctx.configuration()?.daemon,
@@ -282,4 +284,81 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
 fn listener(address: &str) -> Result<String> {
   needy_config::global::validate_address(address, true)?;
   Ok(address.strip_prefix("tcp://").map(str::to_string).unwrap_or_else(|| address.to_string()))
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_NOFILE_TARGET: libc::rlim_t = 16384;
+
+/// Raises the soft `RLIMIT_NOFILE` limit on macOS so long-lived control,
+/// executor, and runner processes do not exhaust the default 256-fd cap during
+/// concurrent `FsService` and exec workloads.
+///
+/// Never fails startup: if `getrlimit` or `setrlimit` fails, logs a warning
+/// and continues with the inherited limit.
+// NOTICE: macOS defaults to a 256 soft `RLIMIT_NOFILE` limit. When a remote
+// actor walks a large workspace hosted on a macOS runner over `FsService`,
+// concurrent open handles and routed exec streams exhaust 256 fds immediately
+// (`EMFILE`, os error 24). Capping at `min(rlim_max, 16384)` avoids `EINVAL`
+// when `rlim_max` is `RLIM_INFINITY` while keeping plenty of headroom.
+// Reference: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getrlimit.2.html
+// (retrieved 2026-11-27: macOS `setrlimit(2)` for `RLIMIT_NOFILE`).
+#[cfg(target_os = "macos")]
+pub(crate) fn raise_nofile_limit() -> Option<u64> {
+  let mut limit = libc::rlimit {
+    rlim_cur: 0,
+    rlim_max: 0,
+  };
+  // SAFETY: `limit` is a valid mutable `libc::rlimit` pointer.
+  if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+    let err = std::io::Error::last_os_error();
+    tracing::warn!("failed to query RLIMIT_NOFILE: {err}");
+    return None;
+  }
+  let target = limit.rlim_max.min(MACOS_NOFILE_TARGET);
+  if limit.rlim_cur >= target {
+    return Some(limit.rlim_cur);
+  }
+  let previous = limit.rlim_cur;
+  limit.rlim_cur = target;
+  // SAFETY: `limit` is a valid `libc::rlimit` pointer with `rlim_cur <= rlim_max`.
+  if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+    let err = std::io::Error::last_os_error();
+    tracing::warn!(previous, target, max = limit.rlim_max, "failed to raise RLIMIT_NOFILE soft limit: {err}");
+    return None;
+  }
+  tracing::debug!(previous, current = target, max = limit.rlim_max, "raised RLIMIT_NOFILE soft limit");
+  Some(target)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn raise_nofile_limit() -> Option<u64> {
+  None
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+  use super::{MACOS_NOFILE_TARGET, raise_nofile_limit};
+
+  #[test]
+  fn raise_nofile_limit_raises_soft_limit_without_error() {
+    let mut before = libc::rlimit {
+      rlim_cur: 0,
+      rlim_max: 0,
+    };
+    // SAFETY: `before` is a valid mutable `libc::rlimit` pointer.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut before) }, 0);
+
+    let raised = raise_nofile_limit().expect("raise_nofile_limit should succeed on macOS");
+
+    let mut after = libc::rlimit {
+      rlim_cur: 0,
+      rlim_max: 0,
+    };
+    // SAFETY: `after` is a valid mutable `libc::rlimit` pointer.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut after) }, 0);
+
+    let expected_min = before.rlim_max.min(MACOS_NOFILE_TARGET);
+    assert!(after.rlim_cur >= expected_min, "expected rlim_cur >= {expected_min}, got {}", after.rlim_cur);
+    assert_eq!(raised, after.rlim_cur);
+  }
 }
