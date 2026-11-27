@@ -45,9 +45,9 @@ fit:
    runner needs an inbound route.
 4. **End to end, the daemon and the runner authenticate each other.**
    Brokered streams carry TLS between the daemon and the runner, and the
-   daemon checks the runner's credential inside it, so an honest broker
-   relays only ciphertext. How the runner learns which daemon certificate
-   to trust without taking the broker's word for it is open (§6.4).
+   daemon checks the runner's credential inside it. Both certificates come
+   from a tenant CA that a machine learns at enrolment, not from the broker,
+   so a compromised broker cannot read or forge a session (§6.4).
 5. **Static profiles keep working unchanged.** A profile that does not opt
    in binds at creation exactly as now; runners that dial the daemon are one
    more source of runners, not a legacy path.
@@ -160,7 +160,7 @@ agent already read would change under it.
 
 | Direction | Message | Meaning |
 | --- | --- | --- |
-| daemon → broker | `Hello` | protocol version, features, daemon identity, the TLS certificate fingerprint runners must pin |
+| daemon → broker | `Hello` | protocol version, features, daemon identity and tenant |
 | broker → daemon | `Welcome` | accepted version and features, broker identity, heartbeat interval |
 | broker → daemon | `Offer` / `Withdraw` | a runner the broker can reach: broker-scoped runner name, os/arch, capabilities, labels |
 | daemon → broker | `Want` | open a stream to an offered runner (on a binding, or for a scheduler that needs it) |
@@ -190,22 +190,40 @@ endpoint (`crates/api-client/src/command.rs`).
 
 ### 6.4 End-to-end security
 
-- **TLS inside every brokered stream.** The daemon presents a certificate
-  whose fingerprint it sent in `Hello`. The broker delivers that fingerprint
-  to the runner with its credential, and the runner pins it
-  (*provisional*: `needy runner serve --daemon-cert-sha256 HEX`). An honest
-  broker then sees only ciphertext.
-- **The pin is only as trustworthy as its delivery.** A broker that
-  delivers the fingerprint could deliver its own and sit in the middle.
-  chisel avoids this because its client gets the fingerprint out of band.
-  Teleport documents the same split: proxy-recording mode can read
-  sessions, node-recording mode cannot. Options, open question 6: the
-  daemon's certificate is signed by a tenant CA the runner learns
-  independently of the broker (for example at device enrolment), the runner
-  keeps the first pin it saw for that daemon and refuses a change, or the
-  broker is trusted and this is stated as a limit. This needs the
-  TLS work tracked as gap G4 in the `rc` integration guide, applied to the
-  daemon's end of a broker stream and to the runner's stdio endpoint.
+- **Mutual TLS inside every brokered stream, anchored in a tenant CA.**
+  Each tenant has a certificate authority. Its key is held by the
+  platform's control plane, never by a broker. TLS 1.3 runs inside the
+  stream, and each side shows a certificate the tenant CA signed:
+  - the daemon's names the tenant and the daemon
+    (*provisional* SAN: `boxide://tenant/<tenant>/daemon/<id>`), is issued
+    to it by whatever deploys it (for `rc`, a Secret), and lives for hours,
+    renewed before expiry;
+  - the runner's names the tenant and the runner
+    (`boxide://tenant/<tenant>/runner/<name>`), is issued when the machine
+    enrols with the platform, and is renewed over the platform's own API.
+- **Each side checks the other's name, not only the chain.**
+  - The runner accepts only a daemon of the tenant it enrolled with.
+  - The daemon accepts only the runner that the binding names. A broker that
+    connects the daemon to a different machine than the binding says fails
+    the handshake.
+- **Where the trust comes from.** A machine learns the tenant CA when it
+  enrols, over the platform's API and the user's session: not from the
+  broker and not per stream. A broker that is compromised can deny or delay
+  service, but cannot read or forge a session, because it holds no
+  certificate the CA signed.
+
+  The platform's control plane, which holds the CA, remains a root of
+  trust, and this spec states that as its limit. This is the model of SSH
+  certificates and of Teleport's cluster CA, without SSH (§12).
+- **Why not a pin delivered by the broker.** A fingerprint that the broker
+  hands to the runner protects only against an honest broker: one that is
+  compromised could hand over its own and sit in the middle. chisel avoids
+  this because its client learns the fingerprint out of band. The tenant CA
+  is that out-of-band channel, set up once at enrolment instead of per
+  stream.
+- **What needy must build.** TLS on the daemon's end of a broker stream and
+  on the runner's stdio endpoint (gap G4 in the `rc` integration guide), with
+  certificate-name checks as above.
 - **The runner credential stays the daemon's to check.** A broker may ask
   for credentials (`MintRequest`) only for names under its own prefix and
   only with the executor role. The daemon refuses an actor-role mint over a
@@ -243,7 +261,7 @@ decided at run time.
 - Profiles without `binding: dynamic` behave exactly as today.
 - Runners that dial the daemon are unchanged and remain the right choice
   inside a cluster (`rc` Workspaces) and on reachable hosts.
-- A runner build that cannot pin the daemon certificate cannot join through
+- A runner build that cannot do mutual TLS against the tenant CA cannot join through
   a broker: the daemon refuses brokered streams that do not start TLS.
 - The broker schema is versioned in `Hello`; unknown features are ignored,
   and an unsupported major version closes the connection with a reason.
@@ -262,7 +280,7 @@ script.
    session layer, the daemon's client side, `needy runner`'s server side, and
    the conformance suite
    ([Boxide](2026-11-27-boxide-protocol-spec.md)). TLS over a
-   stream source with a pinned fingerprint. Cell: a runner joining through a
+   stream source with mutual certificates from a test tenant CA. Cell: a runner joining through a
    local stdio relay and passing the suite.
 3. **Broker protocol.** `needy.v1.broker` schema, the daemon's broker client,
    leases, `MintRequest`, and a reference broker in `xtask` for tests. Cell:
@@ -343,5 +361,7 @@ all of this spec, but each part has a precedent.
 5. Whether `rc` configures broker connections for its daemons (flags and a
    credential Secret), which would replace `rc`'s per-device runner
    credentials for external executors.
-6. How a runner learns the daemon's certificate pin without trusting the
-   broker for it (§6.4).
+6. *Proposed in §6.4:* a tenant CA, learned at enrolment, signs daemon and
+   runner certificates for mutual TLS. Still open: where the CA key lives
+   (the platform's control plane, or a KMS behind it), certificate
+   lifetimes, and how a tenant CA is rotated without dropping sessions.

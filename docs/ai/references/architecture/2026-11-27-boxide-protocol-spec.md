@@ -68,6 +68,28 @@ Every binding carries the same message, `Frame`:
 A peer that speaks any binding speaks all of the protocol. A device agent
 needs only protobuf encoding and a WebSocket, not a gRPC stack.
 
+### 3.1 Securing a binding
+
+Boxide does not encrypt or authenticate frames itself; the binding does.
+
+- **Direct transports:** a binding over a direct path (a local socket, a
+  VM's vsock, a gRPC connection the peers dial themselves) uses that
+  transport's own security.
+- **Relayed paths:** a binding that crosses a relay the peers do not both
+  control MUST run inside TLS 1.3 with mutual certificate authentication.
+  - The certificates carry the peers' identities as URI SANs: the server
+    (the sandbox) is `boxide://tenant/<tenant>/runner/<name>`, and the client
+    `boxide://tenant/<tenant>/daemon/<id>`.
+  - Each side checks the other's name against the session it expects, not
+    only the chain.
+- **Trust anchors** (which CA signs those certificates, and how a machine
+  learns it) are a deployment decision outside Boxide. One deployment is
+  described in the
+  [broker spec §6.4](2026-11-27-dynamic-executor-binding-and-brokers-spec.md):
+  a tenant CA learned at enrolment.
+- **No user identity on the wire.** Who may use a sandbox is decided before
+  the session, by whatever issues certificates and opens streams.
+
 ## 4. Session and frames *(provisional shapes)*
 
 ```proto
