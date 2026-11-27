@@ -51,6 +51,21 @@ The exec messages borrow from envd and from needy's `process.proto`, and the
 file messages from 9P2000.L and needy's `fs.proto` (#136, hardened through
 v0.0.24).
 
+**SSH was considered and set aside (owner, 2026-11-27).** Running SSH over
+the stream would give channels, per-channel windows, encryption and
+certificate-based trust for free. But:
+- files would still need a custom subsystem, because SFTP is what #136
+  replaced;
+- environment and signal requests depend on the server's configuration and
+  implementation;
+- SSH has no hold-and-replay;
+- a second encrypted layer hides operations from needy's interception and
+  trace;
+- an "SSH server" on users' machines invites the wrong expectations.
+
+Boxide keeps SSH's ideas instead: per-stream windows (§4), extension
+negotiation (§8) and certificate-based identities (§3.1).
+
 ## 3. Layers
 
 ```
