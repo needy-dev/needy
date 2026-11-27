@@ -122,7 +122,14 @@ impl LocalLockTable {
     }
   }
 
-  async fn setlk(&self, inode: u64, owner: u64, start: u64, end: u64, kind: u32, pid: u32, block: bool) -> FuseResult<()> {
+  async fn setlk(&self, inode: u64, lock: LocalLock, block: bool) -> FuseResult<()> {
+    let LocalLock {
+      owner,
+      start,
+      end,
+      kind,
+      pid,
+    } = lock;
     if kind == libc::F_UNLCK as u32 {
       let changed = {
         let mut map = self.locks.lock().unwrap_or_else(|e| e.into_inner());
@@ -684,7 +691,20 @@ impl Filesystem for NeedyFs {
     block: bool,
   ) -> FuseResult<()> {
     if self.config.lock_mode != FsLockMode::Remote {
-      return self.local_locks.setlk(inode, lock_owner, start, end, r#type, pid, block).await;
+      return self
+        .local_locks
+        .setlk(
+          inode,
+          LocalLock {
+            owner: lock_owner,
+            start,
+            end,
+            kind: r#type,
+            pid,
+          },
+          block,
+        )
+        .await;
     }
     self
       .client
