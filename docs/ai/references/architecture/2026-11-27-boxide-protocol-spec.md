@@ -288,7 +288,9 @@ free of them.
 
 1. *Decided 2026-11-27:* the protocol is Boxide, and its first package is
    `boxide.v1`.
-2. Whether to define a JSON mapping as well (debuggability vs. byte payloads).
+2. *Decided 2026-11-28 (owner):* no JSON mapping. Frames are binary
+   protobuf on every binding (a WebSocket carries them as binary messages);
+   debugging goes through tools that decode frames.
 3. *Decided 2026-11-28 (owner):* needy's runner keeps its gRPC `Task` and
    `FsTask`; Boxide serves brokered executors only (§12).
 4. Windows: which semantics a Windows server must provide to pass the core
