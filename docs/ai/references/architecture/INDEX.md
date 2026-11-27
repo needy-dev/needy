@@ -51,3 +51,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-26 | [Integrating needy into `rc`](2026-11-26-rc-integration-guide.md) | handoff |
 | 2026-11-26 | [S1: the actor gateway moves into the actor runner](2026-11-26-runner-gateway-design.md) | design |
 | 2026-11-26 | [Multi-host pass, v0.0.19 to v0.0.22](2026-11-26-multi-host-pass-evidence.md) | evidence |
+| 2026-11-27 | [LobeHub execution mesh over needy (proposed design)](2026-11-27-lobehub-execution-mesh-design.md) | design |
