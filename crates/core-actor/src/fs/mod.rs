@@ -147,12 +147,30 @@ pub fn detach(target: &str) -> anyhow::Result<()> {
 }
 
 /// Opens an `FsService.Session` stream on `client`, mounts the workspace at
-/// `config.target` via FUSE3, and keeps the [`fuse::MountGuard`] alive in a
-/// background task until unmounted or the session is cancelled.
+/// `config.target` via FUSE3 with automatic session reconnection across
+/// transient disconnects, and keeps the [`fuse::MountGuard`] alive in a
+/// background task until unmounted or permanently cancelled.
 #[cfg(target_os = "linux")]
 pub async fn mount(client: &needy_api_client::Client, config: MountConfig) -> anyhow::Result<()> {
   let (tx, rx) = client.fs_session().await?;
-  let guard = fuse::mount_with_stream(tx, rx, config).await?;
+  let mount_req = needy_api_proto::v1::FsMount {
+    executor: config.executor.clone(),
+    source: config.source.clone(),
+    target: config.target.clone(),
+    writable: config.writable,
+    lock_mode: config.lock_mode.into(),
+  };
+  let reconnect_client = client.clone();
+  let connector: client::SessionConnector = std::sync::Arc::new(move || {
+    let reconnect_client = reconnect_client.clone();
+    Box::pin(async move {
+      let (tx, rx) = reconnect_client.fs_session().await.map_err(|e| e.to_string())?;
+      let rx: client::SessionResponseStream = Box::pin(rx);
+      Ok((tx, rx))
+    })
+  });
+  let rpc = client::FsRpcClient::with_connector(tx, rx, connector, mount_req, client::DEFAULT_RECONNECT_WINDOW);
+  let guard = fuse::spawn_mount(rpc, config).await?;
   tokio::spawn(guard.wait());
   Ok(())
 }

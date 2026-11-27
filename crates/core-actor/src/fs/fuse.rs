@@ -5,6 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -207,6 +208,7 @@ impl LocalLockTable {
 pub struct NeedyFs {
   client: Arc<FsRpcClient>,
   config: MountConfig,
+  last_epoch: AtomicU64,
   neg_cache: NegativeCache,
   prefetcher: Prefetcher<FsRpcClient>,
   write_behind: WriteBehind<FsRpcClient>,
@@ -217,17 +219,36 @@ pub struct NeedyFs {
 impl NeedyFs {
   /// Constructs a [`NeedyFs`] instance from an already-mounted [`FsRpcClient`].
   pub fn new(client: Arc<FsRpcClient>, config: MountConfig) -> Self {
+    let last_epoch = AtomicU64::new(client.session_epoch());
     let prefetcher = Prefetcher::new(Arc::clone(&client));
     let write_behind = WriteBehind::new(Arc::clone(&client));
     let neg_cache = NegativeCache::with_case_sensitivity(DEFAULT_CAPACITY, DEFAULT_TTL, config.case_insensitive);
     Self {
       client,
       config,
+      last_epoch,
       neg_cache,
       prefetcher,
       write_behind,
       dir_cache: Mutex::new(HashMap::new()),
       local_locks: LocalLockTable::default(),
+    }
+  }
+
+  /// Clears client-side caches whose inode numbers or handles belong to an
+  /// older `FsService` session after a transparent reconnect.
+  // TODO(fs-reconnect-inodes): cached non-root directory inodes (`ino > 1`)
+  // from before a reconnect are not remapped because `HostFs` allocates fresh
+  // session-local inode numbers on each `FsMount`; root-relative lookups
+  // (`ino = 1`) recover immediately. Re-open if a nested-cwd reconnect
+  // scenario requires virtual inode remapping or kernel entry invalidation.
+  async fn sync_epoch(&self) {
+    let epoch = self.client.session_epoch();
+    let prev = self.last_epoch.load(Ordering::Acquire);
+    if epoch != prev && self.last_epoch.compare_exchange(prev, epoch, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+      self.neg_cache.clear();
+      self.prefetcher.clear().await;
+      self.dir_cache.lock().await.clear();
     }
   }
 
@@ -264,6 +285,7 @@ impl NeedyFs {
   }
 
   async fn load_dir_entries(&self, parent: u64) -> FuseResult<Vec<FsDirEntry>> {
+    self.sync_epoch().await;
     {
       let cache = self.dir_cache.lock().await;
       if let Some(entry) = cache.get(&parent)
@@ -335,6 +357,7 @@ impl Filesystem for NeedyFs {
   }
 
   async fn lookup(&self, _req: Request, parent: Inode, name: &OsStr) -> FuseResult<ReplyEntry> {
+    self.sync_epoch().await;
     let name = os_str_to_string(name)?;
     if self.neg_cache.contains(parent, &name) {
       return Err(Errno::new_not_exist());
@@ -467,6 +490,7 @@ impl Filesystem for NeedyFs {
   }
 
   async fn read(&self, _req: Request, inode: Inode, fh: u64, offset: u64, size: u32) -> FuseResult<ReplyData> {
+    self.sync_epoch().await;
     let data = self.prefetcher.read(inode, fh, offset, size).await.map_err(Errno::from)?;
     Ok(ReplyData { data })
   }
