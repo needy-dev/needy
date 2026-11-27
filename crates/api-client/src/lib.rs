@@ -323,6 +323,13 @@ pub trait Executor: Send + Sync {
   async fn exec(&self, requests: mpsc::Receiver<ExecRequest>) -> Result<Responses, Status>;
   async fn list_processes(&self, request: ListProcessesRequest) -> Result<ListProcessesResponse, Status>;
   async fn kill_process(&self, request: KillProcessRequest) -> Result<(), Status>;
+
+  /// Opens a bidirectional `FsService.Session` stream on this executor, when
+  /// the executor serves `FsService` directly (such as a `linux-container`
+  /// executor's `needy daemon executor`).
+  async fn fs_session(&self) -> Result<(mpsc::Sender<SessionRequest>, tonic::Streaming<SessionResponse>), Status> {
+    Err(Status::unimplemented("executor does not serve FsService directly"))
+  }
 }
 
 #[async_trait::async_trait]
@@ -339,6 +346,12 @@ impl Executor for Client {
   async fn kill_process(&self, request: KillProcessRequest) -> Result<(), Status> {
     self.processes().kill_process(request).await?;
     Ok(())
+  }
+
+  async fn fs_session(&self) -> Result<(mpsc::Sender<SessionRequest>, tonic::Streaming<SessionResponse>), Status> {
+    let (tx, rx) = mpsc::channel::<SessionRequest>(fs::QUEUE);
+    let responses = self.fs().session(ReceiverStream::new(rx)).await?.into_inner();
+    Ok((tx, responses))
   }
 }
 

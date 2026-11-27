@@ -1,8 +1,9 @@
 //! Workspace filesystem sessions (`FsService`) on the control daemon.
 //!
-//! Routes each `FsService.Session` stream to either a connected remote runner
-//! (over `RunnerService.FsTask`) or the local host filesystem (`HostFs`),
-//! based on the executor named in the initial `FsMount` request.
+//! Routes each `FsService.Session` stream to a connected remote runner (over
+//! `RunnerService.FsTask`), a `linux-container` executor's `FsService` (over
+//! its executor socket), or the local host filesystem (`HostFs`), based on the
+//! executor named in the initial `FsMount` request.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -31,6 +32,7 @@ const QUEUE: usize = 64;
 enum Target {
   Local,
   Runner(Arc<Link>),
+  Executor(Arc<dyn needy_api_client::Executor>),
 }
 
 /// Maps a POSIX errno name from a `file` chaos fault to the Linux wire errno
@@ -402,20 +404,28 @@ impl FsFaultFilter {
 }
 
 impl Daemon {
-  /// Resolves the executor named in `FsMount` to either a connected remote
-  /// runner or the local host filesystem.
+  /// Maps a resolved executor instance to its filesystem session target.
+  fn target_for_instance(&self, instance: &crate::pool::Instance) -> Result<Target, ControlError> {
+    if let Some(runner) = instance.on_runner() {
+      let link = self.links.get(runner).ok_or_else(|| {
+        ControlError::Unavailable(crate::link::not_connected(runner))
+          .with_diagnostic("runner.not_connected", [("runner".into(), runner.into())])
+      })?;
+      return Ok(Target::Runner(link));
+    }
+    if instance.handle.driver == "linux-container" {
+      return Ok(Target::Executor(instance.handle.executor.clone()));
+    }
+    Ok(Target::Local)
+  }
+
+  /// Resolves the executor named in `FsMount` to a connected remote runner, a
+  /// `linux-container` executor service, or the local host filesystem.
   async fn resolve_fs_target(&self, run: Option<&Arc<Run>>, executor: &str) -> Result<Target, ControlError> {
     if let Some(run) = run
       && let Some(instance) = run.executor(executor)
     {
-      if let Some(runner) = instance.on_runner() {
-        let link = self.links.get(runner).ok_or_else(|| {
-          ControlError::Unavailable(crate::link::not_connected(runner))
-            .with_diagnostic("runner.not_connected", [("runner".into(), runner.into())])
-        })?;
-        return Ok(Target::Runner(link));
-      }
-      return Ok(Target::Local);
+      return self.target_for_instance(&instance);
     }
 
     if !executor.is_empty()
@@ -427,13 +437,8 @@ impl Daemon {
     if !executor.is_empty()
       && executor != "local"
       && let Ok(instance) = self.pool.named(executor).await
-      && let Some(runner) = instance.on_runner()
     {
-      let link = self.links.get(runner).ok_or_else(|| {
-        ControlError::Unavailable(crate::link::not_connected(runner))
-          .with_diagnostic("runner.not_connected", [("runner".into(), runner.into())])
-      })?;
-      return Ok(Target::Runner(link));
+      return self.target_for_instance(&instance);
     }
 
     Ok(Target::Local)
@@ -518,6 +523,28 @@ impl Daemon {
           std::future::ready(resp)
         });
         pump_fs_session(first, requests, runner_tx, responses, out_tx, filter, run, cancel).await;
+      }
+      Target::Executor(executor) => {
+        let (exec_tx, exec_rx) = match executor.fs_session().await {
+          Ok(opened) => opened,
+          Err(status) => {
+            let _ = out_tx.send(error_response(first.id, errno::EIO, status.message())).await;
+            return;
+          }
+        };
+        let responses = exec_rx
+          .take_while(|item| {
+            let keep = match item {
+              Ok(_) => true,
+              Err(status) => {
+                tracing::debug!("executor fs session stream error: {}", status.message());
+                false
+              }
+            };
+            std::future::ready(keep)
+          })
+          .filter_map(|item| std::future::ready(item.ok()));
+        pump_fs_session(first, requests, exec_tx, responses, out_tx, filter, run, cancel).await;
       }
       Target::Local => {
         let lock_mode = FsLockMode::try_from(mount.lock_mode).unwrap_or(FsLockMode::Local);
