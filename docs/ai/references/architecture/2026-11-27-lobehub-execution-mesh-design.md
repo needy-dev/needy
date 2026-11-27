@@ -73,7 +73,7 @@ runners, editors through PTYs).
 
 ### A. LobeHub as control plane, needy as data plane (recommended)
 
-LobeHub (server, device gateway, `lh`, `rc`/lobe-iaas) owns *who*: which
+LobeHub (server, device gateway, `lh`, and `rc` with whatever provisions managed devices) owns *who*: which
 devices take part, which is the actor host, which are executors, the
 session's lifetime, credentials and the routing choices the user makes.
 needy owns *how*: capture, routing decisions, process relay, workspace
@@ -82,7 +82,7 @@ mounts, the actor's network policy and traces.
 This is the Phase 3 spec's split, made concrete for LobeHub:
 
 ```
-LobeHub server ──(1) create session──► lobe-iaas / rc: Actor + executors
+LobeHub server ──(1) create session──► provisioner / rc: Actor + executors
      │                                   (rc mints runner credentials)
      │ (2) needy.attachExecutor (structured fields only)
      ▼
@@ -196,9 +196,9 @@ ends, so the gateway carries ciphertext.
 - **Agent execution config.** An agent bound to an actor device gains
   `executionTargets`: zero or more devices, each with a logical executor name
   and the commands routed to it. The server compiles these into the profile
-  that lobe-iaas hands to `rc` (`executors.NAME`, `commands`), so routing stays
+  that the provisioner hands to `rc` (`executors.NAME`, `commands`), so routing stays
   needy's.
-- **Session lifecycle.** For each run: ensure the Actor (managed: lobe-iaas
+- **Session lifecycle.** For each run: ensure the Actor (managed: the provisioner
   creates an `rc` Actor instead of a Workspace and passes the bootstrap
   secret through `Actor.spec.env`), attach every external executor before
   the run, detach and revoke when it ends. An offline target fails the run
@@ -235,11 +235,11 @@ ends, so the gateway carries ciphertext.
 3. **Data plane:** D1 (or D2 if the owner chooses it), with an end-to-end
    run from a cloud actor to a Mac executor.
 4. **LobeHub model and UI:** execution targets on agents, compilation into
-   profiles, managed actors from lobe-iaas.
+   profiles, managed actors from the provisioner.
 
 ## 8. Open questions
 
-1. D1 or D2 for the data plane, and who owns the router (lobe-iaas or `rc`).
+1. D1 or D2 for the data plane, and who owns the router (the provisioner or `rc`).
 2. How `lh` obtains needy: bundled per platform, or downloaded and verified on
    first use.
 3. Device authorization inside a workspace principal: enroller only, public
