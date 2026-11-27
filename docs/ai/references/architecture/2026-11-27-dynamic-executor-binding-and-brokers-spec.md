@@ -39,8 +39,10 @@ fit:
    run by authorized writers.
 3. **The daemon dials out to brokers.** A *broker* *(provisional)* is an
    outside service the daemon connects to. It offers runners it can reach
-   and opens byte streams to them; each stream carries the unchanged runner
-   protocol. Neither the cluster nor the runner needs an inbound route.
+   and opens byte streams to them. Each stream carries the
+   [sandbox protocol](2026-11-27-sandbox-protocol-spec.md), so a runner can be
+   any implementation of it, not only needy's. Neither the cluster nor the
+   runner needs an inbound route.
 4. **End to end, the daemon and the runner authenticate each other.**
    Brokered streams carry TLS between the daemon and the runner, and the
    daemon checks the runner's credential inside it, so an honest broker
@@ -168,19 +170,23 @@ agent already read would change under it.
 | either | `Ping` / `Pong` | liveness; three missed beats close the connection |
 | broker → daemon | `MintRequest` | ask for a TTL-bound executor-role credential for an offered runner name |
 
-### 6.3 Brokered streams reuse the runner stack
+### 6.3 What a brokered stream carries
 
-A `StreamOpen` from a broker becomes an accepted connection on a virtual
-listener inside the daemon. The daemon serves its existing gRPC services
-on it the way it already serves its Unix and TCP listeners
-(`serve_with_incoming_shutdown` in `crates/api-server/src/server.rs`): the runner on the other end runs
-`needy runner serve` as today, with its byte stream supplied by whatever
-the broker uses to reach it. Authentication, the runner registry, the Node
-Authorizer, links, heartbeats and `DISCONNECT_GRACE` all apply unchanged.
+A broker stream is an opaque byte stream between the daemon and a runner.
+Inside it, in order:
 
-On the runner's machine, the broker's agent hands the stream to
-`needy runner serve --address exec:<connector>` through stdio. The
-`exec:` endpoint already exists (`crates/api-client/src/command.rs`).
+1. TLS (§6.4).
+2. The sandbox protocol's length-prefixed binding
+   ([sandbox protocol §3](2026-11-27-sandbox-protocol-spec.md)): one session,
+   with exec and file streams multiplexed and flow-controlled end to end.
+
+The daemon is the session's client. It maps sandbox exec and file streams
+onto the same relay, routing and file-domain interception it uses for
+`RunnerService.Task` and `FsTask`, so a brokered runner looks like any other
+runner to the rest of the daemon. A runner needs protobuf, TLS and a byte
+stream, not gRPC: a device agent in TypeScript can be one. needy's own
+`needy runner serve` speaks the same session through its `exec:` stdio
+endpoint (`crates/api-client/src/command.rs`).
 
 ### 6.4 End-to-end security
 
@@ -199,7 +205,7 @@ On the runner's machine, the broker's agent hands the stream to
   keeps the first pin it saw for that daemon and refuses a change, or the
   broker is trusted and this is stated as a limit. This needs the
   TLS work tracked as gap G4 in the `rc` integration guide, applied to the
-  virtual listener and the `exec:` client.
+  daemon's end of a broker stream and to the runner's stdio endpoint.
 - **The runner credential stays the daemon's to check.** A broker may ask
   for credentials (`MintRequest`) only for names under its own prefix and
   only with the executor role. The daemon refuses an actor-role mint over a
@@ -252,9 +258,12 @@ script.
    new binding, operator `needy run bind/unbind`, trace events. Cell: one run,
    two native runners, rebind mid-run, check the trace and the drained
    instance.
-2. **Virtual listener and TLS.** Accepted connections from a stream source;
-   TLS on it and in the `exec:` client with a pinned fingerprint. Cell: a
-   runner joining through a local stdio relay.
+2. **Sandbox protocol v1 core.** `proto/sandbox/v1`, the frame and
+   session layer, the daemon's client side, `needy runner`'s server side, and
+   the conformance suite
+   ([sandbox protocol](2026-11-27-sandbox-protocol-spec.md)). TLS over a
+   stream source with a pinned fingerprint. Cell: a runner joining through a
+   local stdio relay and passing the suite.
 3. **Broker protocol.** `needy.v1.broker` schema, the daemon's broker client,
    leases, `MintRequest`, and a reference broker in `xtask` for tests. Cell:
    daemon dials the reference broker, which offers a runner and binds it.
