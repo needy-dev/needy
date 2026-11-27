@@ -1,5 +1,7 @@
 use needy_api_client::Client;
-use needy_api_proto::v1::{ControlRequest, TaskRequest, control_response, exec_request, task_request};
+use needy_api_proto::v1::{
+  ControlRequest, FsPing, FsTaskRequest, TaskRequest, control_response, exec_request, fs_task_request, session_request, task_request,
+};
 use needy_api_proto::v1::{
   CreateJoinTokenRequest, ExecutorDriver, HeartbeatRequest, JoinRequest, JoinTokenState, ListRunnersRequest, ListRunsRequest,
   RotateRunnerRequest, RunnerCapabilities, RunnerRole, RunnerStatus,
@@ -184,14 +186,33 @@ async fn a_task_stream_names_its_task_first() {
 }
 
 #[tokio::test]
+async fn an_fs_task_stream_names_its_task_first() {
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
+  let runner = with(&served.client, MAC_CREDENTIAL);
+  let unnamed = FsTaskRequest {
+    payload: Some(fs_task_request::Payload::Fs(Default::default())),
+  };
+
+  let (_tx, mut requests) = runner.runner_fs_task(7).await.unwrap();
+  let first = requests.message().await.unwrap().unwrap();
+  let status = runner.runners().fs_task(tokio_stream::iter([unnamed])).await.unwrap_err();
+
+  assert_eq!(first.fs.unwrap().body, Some(session_request::Body::Ping(FsPing { timestamp_ms: 77 })));
+  assert_eq!((status.code(), status.message()), (Code::InvalidArgument, "the first request of an fs task stream must name its task"));
+  assert_eq!(served.fake.calls(), ["fs_task mac 7"]);
+}
+
+#[tokio::test]
 async fn only_runners_open_control_and_task_streams() {
   let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let operator = with(&served.client, CONTROL_TOKEN);
 
   let control = operator.runners().control(tokio_stream::iter(Vec::<ControlRequest>::new())).await.unwrap_err();
   let task = operator.runners().task(tokio_stream::iter(Vec::<TaskRequest>::new())).await.unwrap_err();
+  let fs_task = operator.runners().fs_task(tokio_stream::iter(Vec::<FsTaskRequest>::new())).await.unwrap_err();
 
   assert_eq!((control.code(), control.message()), (Code::PermissionDenied, "only runners open a control stream"));
   assert_eq!((task.code(), task.message()), (Code::PermissionDenied, "only runners open task streams"));
+  assert_eq!((fs_task.code(), fs_task.message()), (Code::PermissionDenied, "only runners open fs task streams"));
   assert!(served.fake.calls().is_empty());
 }

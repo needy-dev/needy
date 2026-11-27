@@ -26,6 +26,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
+needy-api-proto.workspace = true
 needy-common.workspace = true
 needy-config.workspace = true
 needy-core.workspace = true
@@ -55,6 +56,7 @@ tokio.workspace = true
 tokio-socks.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+tonic.workspace = true
 tower.workspace = true
 tracing.workspace = true
 
@@ -63,13 +65,13 @@ tracing.workspace = true
 [target.'cfg(unix)'.dependencies]
 # A workspace mount's SFTP stream (`sshfs::stream`) is plain Unix.
 needy-api-client.workspace = true
-needy-api-proto.workspace = true
 nix = { workspace = true, features = ["signal"] }
 sysinfo.workspace = true
 
 # The guest runs only inside a Linux actor, KVM is Linux's, and a container
 # actor's host-side workspace mounts (sshfs, FUSE) are Linux's too.
 [target.'cfg(target_os = "linux")'.dependencies]
+fuse3.workspace = true
 kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
 backon.workspace = true

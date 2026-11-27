@@ -165,6 +165,630 @@ pub struct ErrorDiagnostic {
     pub facts: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsAttr {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub size: u64,
+    #[prost(uint64, tag="3")]
+    pub blocks: u64,
+    #[prost(int64, tag="4")]
+    pub atime_sec: i64,
+    #[prost(uint32, tag="5")]
+    pub atime_nsec: u32,
+    #[prost(int64, tag="6")]
+    pub mtime_sec: i64,
+    #[prost(uint32, tag="7")]
+    pub mtime_nsec: u32,
+    #[prost(int64, tag="8")]
+    pub ctime_sec: i64,
+    #[prost(uint32, tag="9")]
+    pub ctime_nsec: u32,
+    #[prost(enumeration="FsFileType", tag="10")]
+    pub kind: i32,
+    /// Unix permission bits (0o7777 mask).
+    #[prost(uint32, tag="11")]
+    pub perm: u32,
+    #[prost(uint32, tag="12")]
+    pub nlink: u32,
+    #[prost(uint32, tag="13")]
+    pub uid: u32,
+    #[prost(uint32, tag="14")]
+    pub gid: u32,
+    #[prost(uint32, tag="15")]
+    pub blksize: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsMount {
+    /// Executor name in the run's profile.
+    #[prost(string, tag="1")]
+    pub executor: ::prost::alloc::string::String,
+    /// Workspace root path on the executor.
+    #[prost(string, tag="2")]
+    pub source: ::prost::alloc::string::String,
+    /// Target mount path inside the actor (used by file-domain fault rules).
+    #[prost(string, tag="3")]
+    pub target: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub writable: bool,
+    #[prost(enumeration="FsLockMode", tag="5")]
+    pub lock_mode: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsMounted {
+    #[prost(message, optional, tag="1")]
+    pub root: ::core::option::Option<FsAttr>,
+    #[prost(uint64, tag="2")]
+    pub generation: u64,
+    #[prost(enumeration="FsLockMode", tag="3")]
+    pub lock_mode: i32,
+    #[prost(bool, tag="4")]
+    pub writable: bool,
+    /// True when the executor is case-insensitive (e.g. Windows NTFS default).
+    #[prost(bool, tag="5")]
+    pub case_insensitive: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsLookup {
+    #[prost(uint64, tag="1")]
+    pub parent: u64,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsGetAttr {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, optional, tag="2")]
+    pub fh: ::core::option::Option<u64>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsSetAttr {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, optional, tag="2")]
+    pub fh: ::core::option::Option<u64>,
+    #[prost(uint32, optional, tag="3")]
+    pub mode: ::core::option::Option<u32>,
+    #[prost(uint64, optional, tag="4")]
+    pub size: ::core::option::Option<u64>,
+    #[prost(int64, optional, tag="5")]
+    pub atime_sec: ::core::option::Option<i64>,
+    #[prost(uint32, optional, tag="6")]
+    pub atime_nsec: ::core::option::Option<u32>,
+    #[prost(int64, optional, tag="7")]
+    pub mtime_sec: ::core::option::Option<i64>,
+    #[prost(uint32, optional, tag="8")]
+    pub mtime_nsec: ::core::option::Option<u32>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsReadDirPlus {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub offset: u64,
+    #[prost(uint32, tag="3")]
+    pub max_entries: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsDirEntry {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub offset: u64,
+    #[prost(string, tag="3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="4")]
+    pub attr: ::core::option::Option<FsAttr>,
+    #[prost(uint64, tag="5")]
+    pub generation: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FsReadDirPlusReply {
+    #[prost(message, repeated, tag="1")]
+    pub entries: ::prost::alloc::vec::Vec<FsDirEntry>,
+    #[prost(bool, tag="2")]
+    pub eof: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsOpen {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    /// Linux open flags (`O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_TRUNC`, `O_APPEND`).
+    #[prost(uint32, tag="2")]
+    pub flags: u32,
+    /// True when the client enabled kernel writeback caching (server should
+    /// promote `O_WRONLY` to `O_RDWR` and strip `O_APPEND`).
+    #[prost(bool, tag="3")]
+    pub writeback: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsOpened {
+    #[prost(uint64, tag="1")]
+    pub fh: u64,
+    #[prost(uint32, tag="2")]
+    pub open_flags: u32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsRead {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub fh: u64,
+    #[prost(uint64, tag="3")]
+    pub offset: u64,
+    #[prost(uint32, tag="4")]
+    pub size: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsData {
+    #[prost(bytes="vec", tag="1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bool, tag="2")]
+    pub eof: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsWrite {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub fh: u64,
+    #[prost(uint64, tag="3")]
+    pub offset: u64,
+    #[prost(bytes="vec", tag="4")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsWritten {
+    #[prost(uint32, tag="1")]
+    pub written: u32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsFlush {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub fh: u64,
+    #[prost(uint64, tag="3")]
+    pub lock_owner: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsFsync {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub fh: u64,
+    #[prost(bool, tag="3")]
+    pub datasync: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsRelease {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub fh: u64,
+    #[prost(uint64, tag="3")]
+    pub lock_owner: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsCreate {
+    #[prost(uint64, tag="1")]
+    pub parent: u64,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub mode: u32,
+    #[prost(uint32, tag="4")]
+    pub flags: u32,
+    #[prost(bool, tag="5")]
+    pub writeback: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsCreated {
+    #[prost(message, optional, tag="1")]
+    pub attr: ::core::option::Option<FsAttr>,
+    #[prost(uint64, tag="2")]
+    pub generation: u64,
+    #[prost(uint64, tag="3")]
+    pub fh: u64,
+    #[prost(uint32, tag="4")]
+    pub open_flags: u32,
+}
+/// Compound RPC for small-file writes: create (or truncate), write, and close
+/// in one round trip.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsCreateAndWrite {
+    #[prost(uint64, tag="1")]
+    pub parent: u64,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub mode: u32,
+    #[prost(bytes="vec", tag="4")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsMkdir {
+    #[prost(uint64, tag="1")]
+    pub parent: u64,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub mode: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsUnlink {
+    #[prost(uint64, tag="1")]
+    pub parent: u64,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsRmdir {
+    #[prost(uint64, tag="1")]
+    pub parent: u64,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsRename {
+    #[prost(uint64, tag="1")]
+    pub parent: u64,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub new_parent: u64,
+    #[prost(string, tag="4")]
+    pub new_name: ::prost::alloc::string::String,
+    /// Linux `renameat2` flags (`RENAME_NOREPLACE`, `RENAME_EXCHANGE`).
+    #[prost(uint32, tag="5")]
+    pub flags: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsSymlink {
+    #[prost(uint64, tag="1")]
+    pub parent: u64,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub link_target: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsReadLink {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsLinkTarget {
+    #[prost(string, tag="1")]
+    pub target: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsLink {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub new_parent: u64,
+    #[prost(string, tag="3")]
+    pub new_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsStatFs {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsStatFsReply {
+    #[prost(uint64, tag="1")]
+    pub blocks: u64,
+    #[prost(uint64, tag="2")]
+    pub bfree: u64,
+    #[prost(uint64, tag="3")]
+    pub bavail: u64,
+    #[prost(uint64, tag="4")]
+    pub files: u64,
+    #[prost(uint64, tag="5")]
+    pub ffree: u64,
+    #[prost(uint32, tag="6")]
+    pub bsize: u32,
+    #[prost(uint32, tag="7")]
+    pub namelen: u32,
+    #[prost(uint32, tag="8")]
+    pub frsize: u32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsForgetItem {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub nlookup: u64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FsForget {
+    #[prost(message, repeated, tag="1")]
+    pub items: ::prost::alloc::vec::Vec<FsForgetItem>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsLockRange {
+    #[prost(uint64, tag="1")]
+    pub start: u64,
+    #[prost(uint64, tag="2")]
+    pub end: u64,
+    #[prost(enumeration="FsLockType", tag="3")]
+    pub kind: i32,
+    #[prost(uint32, tag="4")]
+    pub pid: u32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsGetLock {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub fh: u64,
+    #[prost(uint64, tag="3")]
+    pub lock_owner: u64,
+    #[prost(message, optional, tag="4")]
+    pub range: ::core::option::Option<FsLockRange>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsSetLock {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(uint64, tag="2")]
+    pub fh: u64,
+    #[prost(uint64, tag="3")]
+    pub lock_owner: u64,
+    #[prost(message, optional, tag="4")]
+    pub range: ::core::option::Option<FsLockRange>,
+    #[prost(bool, tag="5")]
+    pub sleep: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsLockReply {
+    #[prost(message, optional, tag="1")]
+    pub range: ::core::option::Option<FsLockRange>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsPing {
+    #[prost(int64, tag="1")]
+    pub timestamp_ms: i64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsPong {
+    #[prost(int64, tag="1")]
+    pub timestamp_ms: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsForceUnmount {
+    #[prost(string, tag="1")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsError {
+    /// Standard Linux/POSIX errno (e.g., ENOENT=2, EIO=5, EACCES=13, EEXIST=17,
+    /// EINVAL=22, EROFS=30, ENOTEMPTY=39).
+    #[prost(int32, tag="1")]
+    pub errno: i32,
+    #[prost(string, tag="2")]
+    pub message: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsEntry {
+    #[prost(message, optional, tag="1")]
+    pub attr: ::core::option::Option<FsAttr>,
+    #[prost(uint64, tag="2")]
+    pub generation: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsAttrReply {
+    #[prost(message, optional, tag="1")]
+    pub attr: ::core::option::Option<FsAttr>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsOk {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionRequest {
+    #[prost(uint64, tag="1")]
+    pub id: u64,
+    #[prost(oneof="session_request::Body", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26")]
+    pub body: ::core::option::Option<session_request::Body>,
+}
+/// Nested message and enum types in `SessionRequest`.
+pub mod session_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag="2")]
+        Mount(super::FsMount),
+        #[prost(message, tag="3")]
+        Lookup(super::FsLookup),
+        #[prost(message, tag="4")]
+        Getattr(super::FsGetAttr),
+        #[prost(message, tag="5")]
+        Setattr(super::FsSetAttr),
+        #[prost(message, tag="6")]
+        Readdirplus(super::FsReadDirPlus),
+        #[prost(message, tag="7")]
+        Open(super::FsOpen),
+        #[prost(message, tag="8")]
+        Read(super::FsRead),
+        #[prost(message, tag="9")]
+        Write(super::FsWrite),
+        #[prost(message, tag="10")]
+        Flush(super::FsFlush),
+        #[prost(message, tag="11")]
+        Fsync(super::FsFsync),
+        #[prost(message, tag="12")]
+        Release(super::FsRelease),
+        #[prost(message, tag="13")]
+        Create(super::FsCreate),
+        #[prost(message, tag="14")]
+        Mkdir(super::FsMkdir),
+        #[prost(message, tag="15")]
+        Unlink(super::FsUnlink),
+        #[prost(message, tag="16")]
+        Rmdir(super::FsRmdir),
+        #[prost(message, tag="17")]
+        Rename(super::FsRename),
+        #[prost(message, tag="18")]
+        Symlink(super::FsSymlink),
+        #[prost(message, tag="19")]
+        Readlink(super::FsReadLink),
+        #[prost(message, tag="20")]
+        Link(super::FsLink),
+        #[prost(message, tag="21")]
+        Statfs(super::FsStatFs),
+        #[prost(message, tag="22")]
+        Forget(super::FsForget),
+        #[prost(message, tag="23")]
+        Getlock(super::FsGetLock),
+        #[prost(message, tag="24")]
+        Setlock(super::FsSetLock),
+        #[prost(message, tag="25")]
+        Ping(super::FsPing),
+        #[prost(message, tag="26")]
+        CreateAndWrite(super::FsCreateAndWrite),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionResponse {
+    #[prost(uint64, tag="1")]
+    pub id: u64,
+    #[prost(oneof="session_response::Body", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16")]
+    pub body: ::core::option::Option<session_response::Body>,
+}
+/// Nested message and enum types in `SessionResponse`.
+pub mod session_response {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Body {
+        #[prost(message, tag="2")]
+        Error(super::FsError),
+        #[prost(message, tag="3")]
+        Mounted(super::FsMounted),
+        #[prost(message, tag="4")]
+        Entry(super::FsEntry),
+        #[prost(message, tag="5")]
+        Attr(super::FsAttrReply),
+        #[prost(message, tag="6")]
+        Readdirplus(super::FsReadDirPlusReply),
+        #[prost(message, tag="7")]
+        Opened(super::FsOpened),
+        #[prost(message, tag="8")]
+        Data(super::FsData),
+        #[prost(message, tag="9")]
+        Written(super::FsWritten),
+        #[prost(message, tag="10")]
+        Ok(super::FsOk),
+        #[prost(message, tag="11")]
+        Created(super::FsCreated),
+        #[prost(message, tag="12")]
+        LinkTarget(super::FsLinkTarget),
+        #[prost(message, tag="13")]
+        Statfs(super::FsStatFsReply),
+        #[prost(message, tag="14")]
+        Lock(super::FsLockReply),
+        #[prost(message, tag="15")]
+        Pong(super::FsPong),
+        #[prost(message, tag="16")]
+        ForceUnmount(super::FsForceUnmount),
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FsFileType {
+    Unspecified = 0,
+    Regular = 1,
+    Directory = 2,
+    Symlink = 3,
+}
+impl FsFileType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FS_FILE_TYPE_UNSPECIFIED",
+            Self::Regular => "FS_FILE_TYPE_REGULAR",
+            Self::Directory => "FS_FILE_TYPE_DIRECTORY",
+            Self::Symlink => "FS_FILE_TYPE_SYMLINK",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FS_FILE_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "FS_FILE_TYPE_REGULAR" => Some(Self::Regular),
+            "FS_FILE_TYPE_DIRECTORY" => Some(Self::Directory),
+            "FS_FILE_TYPE_SYMLINK" => Some(Self::Symlink),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FsLockMode {
+    Unspecified = 0,
+    /// Locks are enforced locally by the guest/host kernel VFS (zero WAN RTT).
+    Local = 1,
+    /// POSIX byte-range locks are forwarded to the executor server.
+    Remote = 2,
+}
+impl FsLockMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FS_LOCK_MODE_UNSPECIFIED",
+            Self::Local => "FS_LOCK_MODE_LOCAL",
+            Self::Remote => "FS_LOCK_MODE_REMOTE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FS_LOCK_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "FS_LOCK_MODE_LOCAL" => Some(Self::Local),
+            "FS_LOCK_MODE_REMOTE" => Some(Self::Remote),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FsLockType {
+    Unspecified = 0,
+    Read = 1,
+    Write = 2,
+    Unlock = 3,
+}
+impl FsLockType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FS_LOCK_TYPE_UNSPECIFIED",
+            Self::Read => "FS_LOCK_TYPE_READ",
+            Self::Write => "FS_LOCK_TYPE_WRITE",
+            Self::Unlock => "FS_LOCK_TYPE_UNLOCK",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FS_LOCK_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "FS_LOCK_TYPE_READ" => Some(Self::Read),
+            "FS_LOCK_TYPE_WRITE" => Some(Self::Write),
+            "FS_LOCK_TYPE_UNLOCK" => Some(Self::Unlock),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WindowSize {
     #[prost(uint32, tag="1")]
     pub rows: u32,
@@ -803,7 +1427,7 @@ pub struct RunnerTask {
     /// Unique among the tasks of one control stream.
     #[prost(uint64, tag="1")]
     pub id: u64,
-    #[prost(oneof="runner_task::Kind", tags="2, 3, 4, 5, 6")]
+    #[prost(oneof="runner_task::Kind", tags="2, 3, 4, 5, 6, 7")]
     pub kind: ::core::option::Option<runner_task::Kind>,
 }
 /// Nested message and enum types in `RunnerTask`.
@@ -827,6 +1451,9 @@ pub mod runner_task {
         /// control plane using this runner's credential and `x-needy-run-id`.
         #[prost(message, tag="6")]
         StartActor(super::StartActor),
+        /// Open an `FsTask` stream for a workspace mount on this runner.
+        #[prost(message, tag="7")]
+        Fs(super::FsTask),
     }
 }
 /// Start a remote actor for `run_id` using `driver` (for example
@@ -920,6 +1547,35 @@ pub mod task_request {
 pub struct TaskResponse {
     #[prost(message, optional, tag="1")]
     pub exec: ::core::option::Option<ExecRequest>,
+}
+/// A workspace filesystem mount: its `FsMount` and subsequent operations come
+/// on the runner's `FsTask` stream.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsTask {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FsTaskRequest {
+    #[prost(oneof="fs_task_request::Payload", tags="1, 2, 3")]
+    pub payload: ::core::option::Option<fs_task_request::Payload>,
+}
+/// Nested message and enum types in `FsTaskRequest`.
+pub mod fs_task_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        /// The first request: the task this stream is for.
+        #[prost(uint64, tag="1")]
+        TaskId(u64),
+        #[prost(message, tag="2")]
+        Fs(super::SessionResponse),
+        /// The mount could not start or its stream failed; nothing follows.
+        #[prost(message, tag="3")]
+        Error(super::TaskError),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FsTaskResponse {
+    #[prost(message, optional, tag="1")]
+    pub fs: ::core::option::Option<SessionRequest>,
 }
 /// What a runner can host. A join token's scope names roles; a runner
 /// reports its `RunnerCapabilities`, whose roles are those with at least one

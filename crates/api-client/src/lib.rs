@@ -22,6 +22,7 @@ pub mod diagnostic;
 pub mod error;
 pub mod exec;
 pub mod files;
+pub mod fs;
 pub mod guest;
 pub mod ready;
 
@@ -30,13 +31,17 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use needy_api_proto::v1::client_service_client::ClientServiceClient;
+use needy_api_proto::v1::fs_service_client::FsServiceClient;
 use needy_api_proto::v1::guest_service_client::GuestServiceClient;
 use needy_api_proto::v1::health_service_client::HealthServiceClient;
 use needy_api_proto::v1::image_service_client::ImageServiceClient;
 use needy_api_proto::v1::process_service_client::ProcessServiceClient;
 use needy_api_proto::v1::run_service_client::RunServiceClient;
 use needy_api_proto::v1::runner_service_client::RunnerServiceClient;
-use needy_api_proto::v1::{ExecRequest, ExecResponse, KillProcessRequest, ListProcessesRequest, ListProcessesResponse};
+use needy_api_proto::v1::{
+  ExecRequest, ExecResponse, FsTaskRequest, FsTaskResponse, KillProcessRequest, ListProcessesRequest, ListProcessesResponse, SessionRequest,
+  SessionResponse,
+};
 use tokio::sync::mpsc;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::ReceiverStream;
@@ -127,7 +132,15 @@ impl Client {
     let normalized = url.strip_prefix("tcp://").map(|rest| format!("http://{rest}"));
     let url = normalized.as_deref().unwrap_or(url);
 
+    // NOTICE: HTTP/2's 64 KiB default flow-control window starves high-BDP WAN
+    // streams (e.g. `FsService` 16 MiB prefetch over 200 ms RTT drops to ~0.09 MB/s).
+    // Enable adaptive windowing with 16 MiB stream / 32 MiB connection initial windows.
     let configure = move |endpoint: Endpoint| {
+      let endpoint = endpoint
+        .http2_adaptive_window(true)
+        .initial_stream_window_size(16 * 1024 * 1024)
+        .initial_connection_window_size(32 * 1024 * 1024)
+        .tcp_nodelay(true);
       if keep_alive {
         endpoint.http2_keep_alive_interval(KEEP_ALIVE).keep_alive_timeout(KEEP_ALIVE).keep_alive_while_idle(true)
       } else {
@@ -268,7 +281,7 @@ impl Client {
   }
 
   pub fn runners(&self) -> RunnerServiceClient<Service> {
-    RunnerServiceClient::new(self.service())
+    RunnerServiceClient::new(self.service()).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX)
   }
 
   pub fn clients(&self) -> ClientServiceClient<Service> {
@@ -277,6 +290,22 @@ impl Client {
 
   pub fn guest(&self) -> GuestServiceClient<Service> {
     GuestServiceClient::new(self.service())
+  }
+
+  pub fn fs(&self) -> FsServiceClient<Service> {
+    FsServiceClient::new(self.service()).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX)
+  }
+
+  /// Opens a bidirectional `FsService.Session` stream, carrying this client's
+  /// bearer token, headers, and optional `x-needy-run-id`.
+  pub async fn fs_session(&self) -> Result<(mpsc::Sender<SessionRequest>, tonic::Streaming<SessionResponse>)> {
+    fs::session(self).await
+  }
+
+  /// Opens a bidirectional `RunnerService.FsTask` stream for `task_id`,
+  /// sending the initial `task_id` handshake frame automatically.
+  pub async fn runner_fs_task(&self, task_id: u64) -> Result<(mpsc::Sender<FsTaskRequest>, tonic::Streaming<FsTaskResponse>)> {
+    fs::runner_task(self, task_id).await
   }
 }
 

@@ -23,9 +23,9 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use needy_api_client::proto::v1::{
-  ControlRequest, ControlResponse, EndRun, EndRunResponse, ExecEnded, ExecRequest, ExecResponse, ExecTask, KillProcessRequest,
-  ListProcessesRequest, ListProcessesResponse, RunnerReport, RunnerTask, StartActor, TaskError, TaskRequest, TaskResponse, control_request,
-  control_response, exec_response, runner_task, task_request, task_result,
+  ControlRequest, ControlResponse, EndRun, EndRunResponse, ExecEnded, ExecRequest, ExecResponse, ExecTask, FsTask, FsTaskRequest,
+  FsTaskResponse, KillProcessRequest, ListProcessesRequest, ListProcessesResponse, RunnerReport, RunnerTask, SessionRequest, StartActor,
+  TaskError, TaskRequest, TaskResponse, control_request, control_response, exec_response, runner_task, task_request, task_result,
 };
 use needy_api_client::{Executor, Responses};
 use needy_api_server::control::{ControlError, FromRunner, ToRunner};
@@ -84,6 +84,12 @@ enum Pending {
   Exec {
     requests: mpsc::Receiver<ExecRequest>,
     opened: oneshot::Sender<FromRunner<TaskRequest>>,
+  },
+  /// Waiting for the runner to open the fs task's stream, which gets
+  /// `requests`; the runner's side of the stream goes to `opened`.
+  Fs {
+    requests: mpsc::Receiver<SessionRequest>,
+    opened: oneshot::Sender<FromRunner<FsTaskRequest>>,
   },
 }
 
@@ -251,6 +257,25 @@ impl Links {
     });
     Ok(Box::pin(requests))
   }
+
+  /// Hands the fs task stream `runner` opened for `task` to the fs session
+  /// waiting for it, and returns the session's requests to send down that
+  /// stream.
+  pub(crate) fn fs_task(
+    &self,
+    runner: &str,
+    task: u64,
+    responses: FromRunner<FsTaskRequest>,
+  ) -> Result<ToRunner<FsTaskResponse>, ControlError> {
+    let link = self.get(runner).ok_or_else(|| ControlError::NotFound(format!("runner {runner} has no control stream")))?;
+    let Some(Pending::Fs { requests, opened }) = link.take(task) else {
+      return Err(ControlError::NotFound(format!("runner {runner} has no fs task {task}")));
+    };
+    // The fs session gave up waiting; the runner's stream ends with this error.
+    opened.send(responses).map_err(|_| ControlError::NotFound(format!("fs task {task} was given up")))?;
+    let requests = ReceiverStream::new(requests).map(|request| FsTaskResponse { fs: Some(request) });
+    Ok(Box::pin(requests))
+  }
 }
 
 impl Link {
@@ -282,10 +307,10 @@ impl Link {
       }
       (pending, _) => {
         tracing::debug!("runner {}: unexpected result for task {id}", self.runner);
-        // An exec task answered on the control stream is put back for its
+        // An exec or fs task answered on the control stream is put back for its
         // task stream.
-        if let Some(exec @ Pending::Exec { .. }) = pending {
-          self.pending().insert(id, exec);
+        if let Some(streamed @ (Pending::Exec { .. } | Pending::Fs { .. })) = pending {
+          self.pending().insert(id, streamed);
         }
       }
     }
@@ -376,6 +401,28 @@ impl Link {
       Some(Ok(_)) => Err(Status::internal(format!("runner {} sent no exec response first", self.runner))),
       Some(Err(_)) | None => Err(self.disconnected()),
     }
+  }
+
+  /// Opens a workspace filesystem task on this runner: announces `FsTask` on
+  /// the control stream and waits up to [`ANSWER`] for the runner to open its
+  /// `FsTask` stream.
+  pub(crate) async fn open_fs(&self) -> Result<(mpsc::Sender<SessionRequest>, FromRunner<FsTaskRequest>), ControlError> {
+    let id = self.next.fetch_add(1, Ordering::Relaxed);
+    let (tx, requests) = mpsc::channel(QUEUE);
+    let (opened, stream) = oneshot::channel();
+    self.pending().insert(id, Pending::Fs { requests, opened });
+    let pending = PendingExec { link: self, id };
+    let opened = async {
+      self.announce(id, runner_task::Kind::Fs(FsTask {})).await.map_err(|status| ControlError::Unavailable(status.message().to_string()))?;
+      tokio::select! {
+        stream = stream => stream.map_err(|_| ControlError::Unavailable(format!("runner {} disconnected", self.runner))),
+        () = tokio::time::sleep(ANSWER) => Err(ControlError::Unavailable(format!("runner {} did not open the fs task in time", self.runner))),
+      }
+    };
+    let opened = opened.await;
+    // Still pending when the runner never opened the stream.
+    drop(pending);
+    Ok((tx, opened?))
   }
 }
 

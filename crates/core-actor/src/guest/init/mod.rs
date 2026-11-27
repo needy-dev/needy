@@ -213,7 +213,7 @@ async fn boot(container: bool) -> Result<()> {
       writable: m.writable,
       sftp_command: m.sftp_command.clone(),
     };
-    if let Err(e) = crate::sshfs::mount(&client, &mount, user.uid, user.gid).await {
+    if let Err(e) = crate::fs::mount_workspace(&client, &mount, user.uid, user.gid).await {
       tracing::warn!("mount {}: {e:#}", m.target);
     }
   }

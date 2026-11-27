@@ -566,6 +566,46 @@ impl Runners for Fake {
     };
     Ok(Box::pin(tokio_stream::iter([request])))
   }
+
+  /// Sends one ping request for fs task 7 and refuses every other task.
+  async fn fs_task(&self, runner: &str, task: u64, _responses: FromRunner<v1::FsTaskRequest>) -> Result<ToRunner<v1::FsTaskResponse>> {
+    self.call(format!("fs_task {runner} {task}"));
+    if task != 7 {
+      return Err(ControlError::NotFound("no such fs task".into()));
+    }
+    let request = v1::FsTaskResponse {
+      fs: Some(v1::SessionRequest {
+        id: 1,
+        body: Some(v1::session_request::Body::Ping(v1::FsPing { timestamp_ms: 77 })),
+      }),
+    };
+    Ok(Box::pin(tokio_stream::iter([request])))
+  }
+}
+
+#[async_trait::async_trait]
+impl Fs for Fake {
+  /// Replies to every `FsPing` with an `FsPong` carrying the same ID and timestamp.
+  async fn session(&self, caller: Caller, mut requests: FromRunner<v1::SessionRequest>) -> Result<ToRunner<v1::SessionResponse>> {
+    self.call(format!("fs session {caller:?}"));
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tokio::spawn(async move {
+      while let Some(Ok(req)) = requests.next().await {
+        if let Some(v1::session_request::Body::Ping(ping)) = req.body {
+          let reply = v1::SessionResponse {
+            id: req.id,
+            body: Some(v1::session_response::Body::Pong(v1::FsPong {
+              timestamp_ms: ping.timestamp_ms,
+            })),
+          };
+          if tx.send(reply).await.is_err() {
+            break;
+          }
+        }
+      }
+    });
+    Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+  }
 }
 
 /// Tokens the fake's client registry knows: `CLIENT_TOKEN` is the client
@@ -686,6 +726,7 @@ async fn serve_on(caller: Caller, token: Option<&str>, listen: Listen, dir: temp
     .runs(fake.clone())
     .processes(fake.clone())
     .guest(fake.clone())
+    .fs(fake.clone())
     .runners(fake.clone())
     .clients(fake.clone())
     .bind(&[listen])

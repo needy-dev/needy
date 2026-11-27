@@ -25,8 +25,9 @@ use backon::BackoffBuilder as _;
 use futures_util::StreamExt as _;
 use needy_api_client::proto::v1::process_service_server::ProcessService as _;
 use needy_api_client::proto::v1::{
-  ControlRequest, EndRunResponse, HeartbeatRequest, JoinRequest, KillProcessResponse, ListProcessesRequest, ProcessInfo, RunnerReport,
-  TaskError, TaskRequest, TaskResult, control_request, control_response, runner_task, task_request, task_result,
+  ControlRequest, EndRunResponse, FsLockMode, FsTaskRequest, HeartbeatRequest, JoinRequest, KillProcessResponse, ListProcessesRequest,
+  ProcessInfo, RunnerReport, SessionRequest, SessionResponse, TaskError, TaskRequest, TaskResult, control_request, control_response,
+  fs_task_request, runner_task, task_request, task_result,
 };
 use needy_api_client::{Client, Kind};
 use needy_api_server::control::{ControlError, RunnerHost};
@@ -703,6 +704,7 @@ impl Dialer {
           }
           runner_task::Kind::KillProcess(request) => self.service.host.list().iter().any(|p| p.id == request.process_id && p.run_id == *run),
           runner_task::Kind::Exec(_) => true, // The first ExecRequest is checked below.
+          runner_task::Kind::Fs(_) => true,
           runner_task::Kind::StartActor(_) => false,
         };
         if !allowed {
@@ -735,6 +737,20 @@ impl Dialer {
           self.tasks.spawn(async move {
             if let Some(Err(e)) = stop.run_until_cancelled(exec(client, service, id, bound_run, ended, hook)).await {
               tracing::warn!("runner {name}: exec task {id}: {e:#}");
+            }
+          });
+        }
+        runner_task::Kind::Fs(_) => {
+          if let Some(hook) = &self.activity_hook {
+            hook.trigger();
+          }
+          // A task stream presents the credential current when it opens.
+          let client = self.authenticated(&client)?;
+          let name = self.name.clone();
+          let hook = self.activity_hook.clone();
+          self.tasks.spawn(async move {
+            if let Some(Err(e)) = stop.run_until_cancelled(fs_task(client, id, hook)).await {
+              tracing::warn!("runner {name}: fs task {id}: {e:#}");
             }
           });
         }
@@ -817,6 +833,7 @@ async fn answer(service: &ExecutorService, kind: runner_task::Kind) -> task_resu
     }
     runner_task::Kind::EndRun(request) => Ok(task_result::Result::EndRun(end_run(service, &request.run_id).await)),
     runner_task::Kind::Exec(_) => Err(tonic::Status::invalid_argument("an exec task has its own stream")),
+    runner_task::Kind::Fs(_) => Err(tonic::Status::invalid_argument("an fs task has its own stream")),
     runner_task::Kind::StartActor(_) => Err(tonic::Status::invalid_argument("a start_actor task runs asynchronously")),
   };
   answered.unwrap_or_else(|status| task_result::Result::Error(task_error(&status)))
@@ -1016,6 +1033,82 @@ async fn exec(
     }
   };
   tokio::join!(pump, relay);
+  Ok(())
+}
+
+/// Opens the `FsTask` stream for `id` and serves a workspace filesystem
+/// session using `HostFs`: the control plane's `SessionRequest`s flow down
+/// into `HostFs::serve_stream`, and its `SessionResponse`s flow back up as
+/// `FsTaskRequest` frames.
+async fn fs_task(client: Client, id: u64, activity_hook: Option<Arc<ActivityHook>>) -> Result<()> {
+  let (up, mut down) = client.runner_fs_task(id).await?;
+  let left = CancellationToken::new();
+  let (req_tx, req_rx) = mpsc::channel::<std::result::Result<SessionRequest, String>>(RESULTS);
+  let (resp_tx, mut resp_rx) = mpsc::channel::<SessionResponse>(RESULTS);
+
+  let pump = {
+    let left = left.clone();
+    let activity_hook = activity_hook.clone();
+    async move {
+      loop {
+        match down.message().await {
+          Ok(Some(message)) => {
+            if let Some(request) = message.fs {
+              if let Some(hook) = &activity_hook {
+                hook.trigger();
+              }
+              if req_tx.send(Ok(request)).await.is_err() {
+                tracing::debug!("fs task {id}: a request after the fs session ended");
+                break;
+              }
+            }
+          }
+          Ok(None) => break,
+          Err(status) => {
+            tracing::debug!("fs task {id}: fs task stream: {}", status.message());
+            break;
+          }
+        }
+      }
+      drop(req_tx);
+      left.cancel();
+    }
+  };
+
+  let serve = async move {
+    let incoming = ReceiverStream::new(req_rx);
+    needy_core_executor::fs::HostFs::serve_stream(incoming, resp_tx, |mount| {
+      let lock_mode = FsLockMode::try_from(mount.lock_mode).unwrap_or(FsLockMode::Local);
+      needy_core_executor::fs::HostFs::open(&mount.source, mount.writable, lock_mode)
+    })
+    .await;
+  };
+
+  let send_up = {
+    let left = left.clone();
+    async move {
+      loop {
+        let response = tokio::select! {
+          response = resp_rx.recv() => response,
+          () = left.cancelled() => break,
+        };
+        let Some(response) = response else {
+          break;
+        };
+        if let Some(hook) = &activity_hook {
+          hook.trigger();
+        }
+        let message = FsTaskRequest {
+          payload: Some(fs_task_request::Payload::Fs(response)),
+        };
+        if up.send(message).await.is_err() {
+          break;
+        }
+      }
+    }
+  };
+
+  tokio::join!(pump, serve, send_up);
   Ok(())
 }
 

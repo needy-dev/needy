@@ -28,6 +28,7 @@ pub const RUNNER_METHODS: &[&str] = &[
   "/needy.v1.RunnerService/Heartbeat",
   "/needy.v1.RunnerService/Control",
   "/needy.v1.RunnerService/Task",
+  "/needy.v1.RunnerService/FsTask",
 ];
 
 /// Metadata header carried by an actor runner when calling [`ACTOR_METHODS`]
@@ -37,6 +38,7 @@ pub const RUN_ID_HEADER: &str = "x-needy-run-id";
 /// The explicit allowlist of methods an actor may call, whether on a run's
 /// local guest listener or delegated through its bound actor runner.
 pub const ACTOR_METHODS: &[&str] = &[
+  "/needy.v1.FsService/Session",
   "/needy.v1.GuestService/GetConfig",
   "/needy.v1.GuestService/PushEvents",
   "/needy.v1.GuestService/ReportExit",

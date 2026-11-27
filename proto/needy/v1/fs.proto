@@ -1,0 +1,371 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+// FsService carries a multiplexed workspace filesystem session between an
+// actor's FUSE3 client and the control daemon (which routes and intercepts
+// operations before forwarding to the target executor's FS server).
+service FsService {
+  // One bidirectional multiplexed session per workspace mount. Requests and
+  // responses are correlated by `id`, allowing concurrent in-flight lookups,
+  // readdirplus, adaptive prefetch reads, and async write-back.
+  rpc Session(stream SessionRequest) returns (stream SessionResponse);
+}
+
+enum FsFileType {
+  FS_FILE_TYPE_UNSPECIFIED = 0;
+  FS_FILE_TYPE_REGULAR = 1;
+  FS_FILE_TYPE_DIRECTORY = 2;
+  FS_FILE_TYPE_SYMLINK = 3;
+}
+
+enum FsLockMode {
+  FS_LOCK_MODE_UNSPECIFIED = 0;
+  // Locks are enforced locally by the guest/host kernel VFS (zero WAN RTT).
+  FS_LOCK_MODE_LOCAL = 1;
+  // POSIX byte-range locks are forwarded to the executor server.
+  FS_LOCK_MODE_REMOTE = 2;
+}
+
+enum FsLockType {
+  FS_LOCK_TYPE_UNSPECIFIED = 0;
+  FS_LOCK_TYPE_READ = 1;
+  FS_LOCK_TYPE_WRITE = 2;
+  FS_LOCK_TYPE_UNLOCK = 3;
+}
+
+message FsAttr {
+  uint64 ino = 1;
+  uint64 size = 2;
+  uint64 blocks = 3;
+  int64 atime_sec = 4;
+  uint32 atime_nsec = 5;
+  int64 mtime_sec = 6;
+  uint32 mtime_nsec = 7;
+  int64 ctime_sec = 8;
+  uint32 ctime_nsec = 9;
+  FsFileType kind = 10;
+  // Unix permission bits (0o7777 mask).
+  uint32 perm = 11;
+  uint32 nlink = 12;
+  uint32 uid = 13;
+  uint32 gid = 14;
+  uint32 blksize = 15;
+}
+
+message FsMount {
+  // Executor name in the run's profile.
+  string executor = 1;
+  // Workspace root path on the executor.
+  string source = 2;
+  // Target mount path inside the actor (used by file-domain fault rules).
+  string target = 3;
+  bool writable = 4;
+  FsLockMode lock_mode = 5;
+}
+
+message FsMounted {
+  FsAttr root = 1;
+  uint64 generation = 2;
+  FsLockMode lock_mode = 3;
+  bool writable = 4;
+  // True when the executor is case-insensitive (e.g. Windows NTFS default).
+  bool case_insensitive = 5;
+}
+
+message FsLookup {
+  uint64 parent = 1;
+  string name = 2;
+}
+
+message FsGetAttr {
+  uint64 ino = 1;
+  optional uint64 fh = 2;
+}
+
+message FsSetAttr {
+  uint64 ino = 1;
+  optional uint64 fh = 2;
+  optional uint32 mode = 3;
+  optional uint64 size = 4;
+  optional int64 atime_sec = 5;
+  optional uint32 atime_nsec = 6;
+  optional int64 mtime_sec = 7;
+  optional uint32 mtime_nsec = 8;
+}
+
+message FsReadDirPlus {
+  uint64 ino = 1;
+  uint64 offset = 2;
+  uint32 max_entries = 3;
+}
+
+message FsDirEntry {
+  uint64 ino = 1;
+  uint64 offset = 2;
+  string name = 3;
+  FsAttr attr = 4;
+  uint64 generation = 5;
+}
+
+message FsReadDirPlusReply {
+  repeated FsDirEntry entries = 1;
+  bool eof = 2;
+}
+
+message FsOpen {
+  uint64 ino = 1;
+  // Linux open flags (`O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_TRUNC`, `O_APPEND`).
+  uint32 flags = 2;
+  // True when the client enabled kernel writeback caching (server should
+  // promote `O_WRONLY` to `O_RDWR` and strip `O_APPEND`).
+  bool writeback = 3;
+}
+
+message FsOpened {
+  uint64 fh = 1;
+  uint32 open_flags = 2;
+}
+
+message FsRead {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 offset = 3;
+  uint32 size = 4;
+}
+
+message FsData {
+  bytes data = 1;
+  bool eof = 2;
+}
+
+message FsWrite {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 offset = 3;
+  bytes data = 4;
+}
+
+message FsWritten {
+  uint32 written = 1;
+}
+
+message FsFlush {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 lock_owner = 3;
+}
+
+message FsFsync {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  bool datasync = 3;
+}
+
+message FsRelease {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 lock_owner = 3;
+}
+
+message FsCreate {
+  uint64 parent = 1;
+  string name = 2;
+  uint32 mode = 3;
+  uint32 flags = 4;
+  bool writeback = 5;
+}
+
+message FsCreated {
+  FsAttr attr = 1;
+  uint64 generation = 2;
+  uint64 fh = 3;
+  uint32 open_flags = 4;
+}
+
+// Compound RPC for small-file writes: create (or truncate), write, and close
+// in one round trip.
+message FsCreateAndWrite {
+  uint64 parent = 1;
+  string name = 2;
+  uint32 mode = 3;
+  bytes data = 4;
+}
+
+message FsMkdir {
+  uint64 parent = 1;
+  string name = 2;
+  uint32 mode = 3;
+}
+
+message FsUnlink {
+  uint64 parent = 1;
+  string name = 2;
+}
+
+message FsRmdir {
+  uint64 parent = 1;
+  string name = 2;
+}
+
+message FsRename {
+  uint64 parent = 1;
+  string name = 2;
+  uint64 new_parent = 3;
+  string new_name = 4;
+  // Linux `renameat2` flags (`RENAME_NOREPLACE`, `RENAME_EXCHANGE`).
+  uint32 flags = 5;
+}
+
+message FsSymlink {
+  uint64 parent = 1;
+  string name = 2;
+  string link_target = 3;
+}
+
+message FsReadLink {
+  uint64 ino = 1;
+}
+
+message FsLinkTarget {
+  string target = 1;
+}
+
+message FsLink {
+  uint64 ino = 1;
+  uint64 new_parent = 2;
+  string new_name = 3;
+}
+
+message FsStatFs {
+  uint64 ino = 1;
+}
+
+message FsStatFsReply {
+  uint64 blocks = 1;
+  uint64 bfree = 2;
+  uint64 bavail = 3;
+  uint64 files = 4;
+  uint64 ffree = 5;
+  uint32 bsize = 6;
+  uint32 namelen = 7;
+  uint32 frsize = 8;
+}
+
+message FsForgetItem {
+  uint64 ino = 1;
+  uint64 nlookup = 2;
+}
+
+message FsForget {
+  repeated FsForgetItem items = 1;
+}
+
+message FsLockRange {
+  uint64 start = 1;
+  uint64 end = 2;
+  FsLockType kind = 3;
+  uint32 pid = 4;
+}
+
+message FsGetLock {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 lock_owner = 3;
+  FsLockRange range = 4;
+}
+
+message FsSetLock {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 lock_owner = 3;
+  FsLockRange range = 4;
+  bool sleep = 5;
+}
+
+message FsLockReply {
+  FsLockRange range = 1;
+}
+
+message FsPing {
+  int64 timestamp_ms = 1;
+}
+
+message FsPong {
+  int64 timestamp_ms = 1;
+}
+
+message FsForceUnmount {
+  string reason = 1;
+}
+
+message FsError {
+  // Standard Linux/POSIX errno (e.g., ENOENT=2, EIO=5, EACCES=13, EEXIST=17,
+  // EINVAL=22, EROFS=30, ENOTEMPTY=39).
+  int32 errno = 1;
+  string message = 2;
+}
+
+message FsEntry {
+  FsAttr attr = 1;
+  uint64 generation = 2;
+}
+
+message FsAttrReply {
+  FsAttr attr = 1;
+}
+
+message FsOk {}
+
+message SessionRequest {
+  uint64 id = 1;
+  oneof body {
+    FsMount mount = 2;
+    FsLookup lookup = 3;
+    FsGetAttr getattr = 4;
+    FsSetAttr setattr = 5;
+    FsReadDirPlus readdirplus = 6;
+    FsOpen open = 7;
+    FsRead read = 8;
+    FsWrite write = 9;
+    FsFlush flush = 10;
+    FsFsync fsync = 11;
+    FsRelease release = 12;
+    FsCreate create = 13;
+    FsMkdir mkdir = 14;
+    FsUnlink unlink = 15;
+    FsRmdir rmdir = 16;
+    FsRename rename = 17;
+    FsSymlink symlink = 18;
+    FsReadLink readlink = 19;
+    FsLink link = 20;
+    FsStatFs statfs = 21;
+    FsForget forget = 22;
+    FsGetLock getlock = 23;
+    FsSetLock setlock = 24;
+    FsPing ping = 25;
+    FsCreateAndWrite create_and_write = 26;
+  }
+}
+
+message SessionResponse {
+  uint64 id = 1;
+  oneof body {
+    FsError error = 2;
+    FsMounted mounted = 3;
+    FsEntry entry = 4;
+    FsAttrReply attr = 5;
+    FsReadDirPlusReply readdirplus = 6;
+    FsOpened opened = 7;
+    FsData data = 8;
+    FsWritten written = 9;
+    FsOk ok = 10;
+    FsCreated created = 11;
+    FsLinkTarget link_target = 12;
+    FsStatFsReply statfs = 13;
+    FsLockReply lock = 14;
+    FsPong pong = 15;
+    FsForceUnmount force_unmount = 16;
+  }
+}

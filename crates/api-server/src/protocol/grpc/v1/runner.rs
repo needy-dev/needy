@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use needy_api_proto::v1::runner_service_server::RunnerService;
-use needy_api_proto::v1::{ControlRequest, ControlResponse, TaskRequest, TaskResponse, task_request};
+use needy_api_proto::v1::{
+  ControlRequest, ControlResponse, FsTaskRequest, FsTaskResponse, TaskRequest, TaskResponse, fs_task_request, task_request,
+};
 use needy_api_proto::v1::{
   CreateJoinTokenRequest, CreateJoinTokenResponse, HeartbeatRequest, HeartbeatResponse, JoinRequest, JoinResponse, ListJoinTokensRequest,
   ListJoinTokensResponse, ListRunnersRequest, ListRunnersResponse, MintRunnerCredentialRequest, MintRunnerCredentialResponse,
@@ -51,6 +53,7 @@ impl<R> Adapter<R> {
 impl<R: Runners> RunnerService for Adapter<R> {
   type ControlStream = Streamed<ControlResponse>;
   type TaskStream = Streamed<TaskResponse>;
+  type FsTaskStream = Streamed<FsTaskResponse>;
 
   async fn control(&self, request: Request<Streaming<ControlRequest>>) -> Result<Response<Self::ControlStream>, Status> {
     let runner = self.runner(&request, "open a control stream")?;
@@ -68,6 +71,19 @@ impl<R: Runners> RunnerService for Adapter<R> {
       _ => return Err(ControlError::Invalid("the first request of a task stream must name its task".into()).into()),
     };
     let requests = self.runners.task(&runner, task, Box::pin(inbound)).await?;
+    Ok(Response::new(Box::pin(requests.map(Ok))))
+  }
+
+  async fn fs_task(&self, request: Request<Streaming<FsTaskRequest>>) -> Result<Response<Self::FsTaskStream>, Status> {
+    let runner = self.runner(&request, "open fs task streams")?;
+    let mut inbound = request.into_inner();
+    let task = match inbound.message().await? {
+      Some(FsTaskRequest {
+        payload: Some(fs_task_request::Payload::TaskId(task)),
+      }) => task,
+      _ => return Err(ControlError::Invalid("the first request of an fs task stream must name its task".into()).into()),
+    };
+    let requests = self.runners.fs_task(&runner, task, Box::pin(inbound)).await?;
     Ok(Response::new(Box::pin(requests.map(Ok))))
   }
 

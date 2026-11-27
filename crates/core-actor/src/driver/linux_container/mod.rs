@@ -389,7 +389,7 @@ impl LinuxContainer {
           writable: m.writable,
           sftp_command: m.sftp_command.clone(),
         };
-        if let Err(source) = crate::sshfs::mount(&client, &mount, uid, gid).await {
+        if let Err(source) = crate::fs::mount_workspace(&client, &mount, uid, gid).await {
           let mut points: Vec<PathBuf> = made.into_iter().map(|(point, _)| point).collect();
           for made in &points {
             if let Err(e) = detach(made) {

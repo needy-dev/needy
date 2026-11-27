@@ -22,7 +22,7 @@ pub use linux::{Mount, detach, mount};
 /// Pre-existing ancestor directories are left untouched so system directories
 /// (such as `/home`, `/mnt`, or `/var`) never have their ownership altered.
 #[cfg(unix)]
-fn create_mount_target(target: &std::path::Path, uid: u32, gid: u32) -> anyhow::Result<()> {
+pub(crate) fn create_mount_target(target: &std::path::Path, uid: u32, gid: u32) -> anyhow::Result<()> {
   use anyhow::Context as _;
   create_mount_target_with(target, |dir| match std::os::unix::fs::chown(dir, Some(uid), Some(gid)) {
     Ok(()) => Ok(()),

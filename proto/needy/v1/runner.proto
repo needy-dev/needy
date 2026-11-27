@@ -4,6 +4,7 @@ syntax = "proto3";
 package needy.v1;
 
 import "needy/v1/diagnostic.proto";
+import "needy/v1/fs.proto";
 import "needy/v1/process.proto";
 
 // RunnerService is the control plane's runner registry: join tokens, the
@@ -56,6 +57,11 @@ service RunnerService {
   // control plane's responses carry the exec's requests, the first being
   // the start or the attach. Authenticated by the runner's credential.
   rpc Task(stream TaskRequest) returns (stream TaskResponse);
+  // One workspace filesystem task's stream, opened by the runner: its first
+  // request names the task, its later requests carry `FsService` responses,
+  // and the control plane's responses carry `FsService` requests.
+  // Authenticated by the runner's credential.
+  rpc FsTask(stream FsTaskRequest) returns (stream FsTaskResponse);
 }
 
 // What a runner can host. A join token's scope names roles; a runner
@@ -340,6 +346,8 @@ message RunnerTask {
     // Start a remote actor for a run and bridge its channels outbound to the
     // control plane using this runner's credential and `x-needy-run-id`.
     StartActor start_actor = 6;
+    // Open an `FsTask` stream for a workspace mount on this runner.
+    FsTask fs = 7;
   }
 }
 
@@ -402,4 +410,22 @@ message TaskRequest {
 
 message TaskResponse {
   ExecRequest exec = 1;
+}
+
+// A workspace filesystem mount: its `FsMount` and subsequent operations come
+// on the runner's `FsTask` stream.
+message FsTask {}
+
+message FsTaskRequest {
+  oneof payload {
+    // The first request: the task this stream is for.
+    uint64 task_id = 1;
+    SessionResponse fs = 2;
+    // The mount could not start or its stream failed; nothing follows.
+    TaskError error = 3;
+  }
+}
+
+message FsTaskResponse {
+  SessionRequest fs = 1;
 }
