@@ -1,0 +1,380 @@
+// Boxide v1 file streams (spec §6): inode-based operations a FUSE client can
+// mount. Derived from needy's `needy.v1` FsService (#136) without its
+// needy-specific fields. Names and link targets are bytes: POSIX names need
+// not be UTF-8, and a Windows server encodes UTF-16 as WTF-8.
+syntax = "proto3";
+
+package boxide.v1;
+
+enum FsFileType {
+  FS_FILE_TYPE_UNSPECIFIED = 0;
+  FS_FILE_TYPE_REGULAR = 1;
+  FS_FILE_TYPE_DIRECTORY = 2;
+  FS_FILE_TYPE_SYMLINK = 3;
+}
+
+enum FsLockMode {
+  FS_LOCK_MODE_UNSPECIFIED = 0;
+  // Locks are enforced by the client's kernel only.
+  FS_LOCK_MODE_LOCAL = 1;
+  // Byte-range locks are forwarded to the server (`fs.locks`).
+  FS_LOCK_MODE_REMOTE = 2;
+}
+
+enum FsLockType {
+  FS_LOCK_TYPE_UNSPECIFIED = 0;
+  FS_LOCK_TYPE_READ = 1;
+  FS_LOCK_TYPE_WRITE = 2;
+  FS_LOCK_TYPE_UNLOCK = 3;
+}
+
+message FsAttr {
+  uint64 ino = 1;
+  uint64 size = 2;
+  uint64 blocks = 3;
+  int64 atime_sec = 4;
+  uint32 atime_nsec = 5;
+  int64 mtime_sec = 6;
+  uint32 mtime_nsec = 7;
+  int64 ctime_sec = 8;
+  uint32 ctime_nsec = 9;
+  FsFileType kind = 10;
+  // Permission bits (0o7777 mask), as they are on the host (spec §6.2).
+  uint32 perm = 11;
+  uint32 nlink = 12;
+  uint32 uid = 13;
+  uint32 gid = 14;
+  uint32 blksize = 15;
+  // How long the client may cache this attribute, in milliseconds.
+  uint32 valid_ms = 16;
+}
+
+// Opens a file stream on the directory `root` of the server's machine. The
+// server decides which roots it serves and refuses others.
+message FsMount {
+  bytes root = 1;
+  bool read_only = 2;
+  FsLockMode lock_mode = 3;
+  map<string, bytes> extensions = 15;
+}
+
+message FsMounted {
+  FsAttr root = 1;
+  uint64 generation = 2;
+  FsLockMode lock_mode = 3;
+  bool read_only = 4;
+  // The file capabilities granted for this mount (spec §7), such as
+  // `fs.case-sensitive` or `fs.rename-replace-open`.
+  repeated string capabilities = 5;
+}
+
+message FsLookup {
+  uint64 parent = 1;
+  bytes name = 2;
+}
+
+message FsGetAttr {
+  uint64 ino = 1;
+  optional uint64 fh = 2;
+}
+
+message FsSetAttr {
+  uint64 ino = 1;
+  optional uint64 fh = 2;
+  optional uint32 mode = 3;
+  optional uint64 size = 4;
+  optional int64 atime_sec = 5;
+  optional uint32 atime_nsec = 6;
+  optional int64 mtime_sec = 7;
+  optional uint32 mtime_nsec = 8;
+  // Requires `fs.ownership`; `EPERM` otherwise.
+  optional uint32 uid = 9;
+  optional uint32 gid = 10;
+}
+
+message FsReadDirPlus {
+  uint64 ino = 1;
+  uint64 offset = 2;
+  uint32 max_entries = 3;
+}
+
+message FsDirEntry {
+  uint64 ino = 1;
+  uint64 offset = 2;
+  bytes name = 3;
+  FsAttr attr = 4;
+  uint64 generation = 5;
+}
+
+message FsReadDirPlusReply {
+  repeated FsDirEntry entries = 1;
+  bool eof = 2;
+}
+
+message FsOpen {
+  uint64 ino = 1;
+  // Linux open flags (`O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_TRUNC`, `O_APPEND`).
+  uint32 flags = 2;
+  // The client's kernel owns write-back: the server opens write-only handles
+  // read-write and ignores `O_APPEND`.
+  bool writeback = 3;
+}
+
+message FsOpened {
+  uint64 fh = 1;
+  uint32 open_flags = 2;
+}
+
+message FsRead {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 offset = 3;
+  uint32 size = 4;
+}
+
+message FsData {
+  bytes data = 1;
+  bool eof = 2;
+}
+
+message FsWrite {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 offset = 3;
+  bytes data = 4;
+}
+
+message FsWritten {
+  uint32 written = 1;
+}
+
+message FsFlush {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 lock_owner = 3;
+}
+
+message FsFsync {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  bool datasync = 3;
+}
+
+message FsRelease {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 lock_owner = 3;
+}
+
+message FsCreate {
+  uint64 parent = 1;
+  bytes name = 2;
+  uint32 mode = 3;
+  uint32 flags = 4;
+  bool writeback = 5;
+}
+
+message FsCreated {
+  FsAttr attr = 1;
+  uint64 generation = 2;
+  uint64 fh = 3;
+  uint32 open_flags = 4;
+}
+
+// Create (or truncate), write and close in one round trip (`fs.compound`).
+message FsCreateAndWrite {
+  uint64 parent = 1;
+  bytes name = 2;
+  uint32 mode = 3;
+  bytes data = 4;
+}
+
+message FsMkdir {
+  uint64 parent = 1;
+  bytes name = 2;
+  uint32 mode = 3;
+}
+
+message FsUnlink {
+  uint64 parent = 1;
+  bytes name = 2;
+}
+
+message FsRmdir {
+  uint64 parent = 1;
+  bytes name = 2;
+}
+
+message FsRename {
+  uint64 parent = 1;
+  bytes name = 2;
+  uint64 new_parent = 3;
+  bytes new_name = 4;
+  // Linux `renameat2` flags (`RENAME_NOREPLACE`, `RENAME_EXCHANGE`).
+  uint32 flags = 5;
+}
+
+// Requires `fs.symlink`.
+message FsSymlink {
+  uint64 parent = 1;
+  bytes name = 2;
+  bytes link_target = 3;
+}
+
+// Requires `fs.symlink`.
+message FsReadLink {
+  uint64 ino = 1;
+}
+
+message FsLinkTarget {
+  bytes target = 1;
+}
+
+// Requires `fs.link`.
+message FsLink {
+  uint64 ino = 1;
+  uint64 new_parent = 2;
+  bytes new_name = 3;
+}
+
+message FsStatFs {
+  uint64 ino = 1;
+}
+
+message FsStatFsReply {
+  uint64 blocks = 1;
+  uint64 bfree = 2;
+  uint64 bavail = 3;
+  uint64 files = 4;
+  uint64 ffree = 5;
+  uint32 bsize = 6;
+  uint32 namelen = 7;
+  uint32 frsize = 8;
+}
+
+message FsForgetItem {
+  uint64 ino = 1;
+  uint64 nlookup = 2;
+}
+
+message FsForget {
+  repeated FsForgetItem items = 1;
+}
+
+message FsLockRange {
+  uint64 start = 1;
+  uint64 end = 2;
+  FsLockType kind = 3;
+  uint32 pid = 4;
+}
+
+// Requires `fs.locks`.
+message FsGetLock {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 lock_owner = 3;
+  FsLockRange range = 4;
+}
+
+// Requires `fs.locks`.
+message FsSetLock {
+  uint64 ino = 1;
+  uint64 fh = 2;
+  uint64 lock_owner = 3;
+  FsLockRange range = 4;
+  bool sleep = 5;
+}
+
+message FsLockReply {
+  FsLockRange range = 1;
+}
+
+// Batched metadata prefetch from `ino`, breadth first, up to `max_depth`
+// levels and `max_dirs` directories (`fs.prefetch-tree`).
+message FsPrefetchTree {
+  uint64 ino = 1;
+  uint32 max_depth = 2;
+  uint32 max_dirs = 3;
+  // Directory names not descended into (still listed in their parent).
+  repeated bytes skip_names = 4;
+}
+
+message FsPrefetchDir {
+  uint64 ino = 1;
+  repeated FsDirEntry entries = 2;
+}
+
+message FsPrefetchTreeReply {
+  repeated FsPrefetchDir dirs = 1;
+}
+
+message FsError {
+  // A Linux errno value, whatever the server's OS (spec §6.2).
+  int32 errno = 1;
+  string message = 2;
+}
+
+message FsEntry {
+  FsAttr attr = 1;
+  uint64 generation = 2;
+}
+
+message FsAttrReply {
+  FsAttr attr = 1;
+}
+
+message FsOk {}
+
+// Client → server on a file stream. `id` pairs a request with its response;
+// many may be in flight.
+message FsRequest {
+  uint64 id = 1;
+  oneof body {
+    FsLookup lookup = 2;
+    FsGetAttr getattr = 3;
+    FsSetAttr setattr = 4;
+    FsReadDirPlus readdirplus = 5;
+    FsOpen open = 6;
+    FsRead read = 7;
+    FsWrite write = 8;
+    FsFlush flush = 9;
+    FsFsync fsync = 10;
+    FsRelease release = 11;
+    FsCreate create = 12;
+    FsMkdir mkdir = 13;
+    FsUnlink unlink = 14;
+    FsRmdir rmdir = 15;
+    FsRename rename = 16;
+    FsSymlink symlink = 17;
+    FsReadLink readlink = 18;
+    FsLink link = 19;
+    FsStatFs statfs = 20;
+    FsForget forget = 21;
+    FsGetLock getlock = 22;
+    FsSetLock setlock = 23;
+    FsCreateAndWrite create_and_write = 24;
+    FsPrefetchTree prefetch_tree = 25;
+  }
+}
+
+// Server → client on a file stream. The first response, with `id` 0, is
+// `mounted`.
+message FsResponse {
+  uint64 id = 1;
+  oneof body {
+    FsError error = 2;
+    FsMounted mounted = 3;
+    FsEntry entry = 4;
+    FsAttrReply attr = 5;
+    FsReadDirPlusReply readdirplus = 6;
+    FsOpened opened = 7;
+    FsData data = 8;
+    FsWritten written = 9;
+    FsOk ok = 10;
+    FsCreated created = 11;
+    FsLinkTarget link_target = 12;
+    FsStatFsReply statfs = 13;
+    FsLockReply lock = 14;
+    FsPrefetchTreeReply prefetch_tree = 15;
+  }
+}
