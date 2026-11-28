@@ -50,7 +50,6 @@ pub struct Resolved {
 }
 
 impl Resolved {
-  #[cfg(unix)]
   pub fn headers(&self) -> &BTreeMap<String, String> {
     &self.headers
   }

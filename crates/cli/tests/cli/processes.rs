@@ -28,7 +28,7 @@ pub(super) fn list(home: &Path) -> std::io::Result<Vec<Process>> {
         }
         let kind = if command.contains("daemon holder --config-file") {
           "runtime-holder"
-        } else if command.contains("run execution-holder --startup-file") {
+        } else if command.contains("run execution-holder --startup-stdin") {
           "execution-holder"
         } else if command.contains("image/firecracker") && command.starts_with("/bin/sh ") {
           "actor"

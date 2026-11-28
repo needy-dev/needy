@@ -68,8 +68,10 @@ needy --context actor-host run create -it -f ./client.yaml
 
 The existing actor image and host prerequisites still apply. Client execution
 supports the native executor driver. Remote container creation remains outside
-the existing driver support limits. Automatic Windows client holders fail
-before reservation because private startup-file ACL support remains deferred.
+the existing driver support limits. The automatic execution holder receives its
+startup capability over an anonymous stdin pipe rather than a startup file on
+disk, enabling same-account client execution on Unix and Windows without
+writing startup secrets to the filesystem.
 
 ## Temporary changes
 
