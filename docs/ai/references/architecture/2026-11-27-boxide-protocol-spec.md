@@ -51,6 +51,22 @@ The exec messages borrow from envd and from needy's `process.proto`, and the
 file messages from 9P2000.L and needy's `fs.proto` (#136, hardened through
 v0.0.24).
 
+**Platform differences.** The capability model follows VS Code's file
+system providers, which declare flags such as `PathCaseSensitive` (set on
+Linux only) and `FileAtomicRename`, so callers branch on the flag and not on
+the OS
+([diskFileSystemProvider.ts](https://github.com/microsoft/vscode/blob/e433f25/src/vs/platform/files/node/diskFileSystemProvider.ts#L60-L80)).
+Win32-OpenSSH is the counter-example. It advertises `posix-rename` but
+implements it with `MoveFileExW`, and it ends any signalled child with exit
+code 0 while reporting success
+([signal_sigchld.c](https://github.com/PowerShell/openssh-portable/blob/0172cc6/contrib/win32/win32compat/signal_sigchld.c#L177-L195)).
+The name mapping follows WSL and Cygwin
+([Cygwin special names](https://cygwin.com/cygwin-ug-net/using-specialnames.html)),
+and the Windows signal table follows hcsshim's mapping of `TERM` to a console
+shutdown event
+([signal.go](https://github.com/microsoft/hcsshim/blob/02c8742/internal/signals/signal.go#L165-L202)).
+All were read on 2026-11-28.
+
 **SSH was considered and set aside (owner, 2026-11-27).** Running SSH over
 the stream would give channels, per-channel windows, encryption and
 certificate-based trust for free. But:
@@ -162,10 +178,29 @@ A client opens an exec stream with `Open{exec: Start}`:
 
 Rules:
 
-- **Signal delivery:** a signal goes to the process group the server started
-  for the command. A server that cannot deliver a named signal returns
-  `unsupported` for that `Signal` and keeps the process running. Windows
-  servers emulate `INT` by writing `0x03` to a PTY.
+- **Never report what did not happen.** A server answers a `Signal` it cannot
+  deliver as asked with `unsupported` and leaves the process running. It
+  does not turn the signal into something else unless the table below says
+  so, and it never ends a process because of a signal it does not support.
+  `Exited{signal}` names a signal only when one really ended the process.
+  (Win32-OpenSSH ends every child with exit code 0 and reports success for any
+  signal; §2 lists it as the behaviour this rule forbids.)
+- **Signal delivery:** with `exec.pgroup`, a signal goes to the process group
+  the server started for the command; without it, to the process and the
+  children the server can find. With `exec.signals.posix`, every POSIX
+  signal is delivered as itself. Without it, the server delivers only
+  these:
+
+  | Signal | Without `exec.signals.posix` (e.g. Windows) |
+  | --- | --- |
+  | `INT` | With a PTY, write `0x03`. Without one, `CTRL_BREAK_EVENT` to the command's console process group (started with `CREATE_NEW_PROCESS_GROUP`). |
+  | `TERM` | `CTRL_BREAK_EVENT`. If the process is still running after a grace period stated in `Welcome`, end the tree as for `KILL`. |
+  | `KILL` | End the whole process tree (a job object, then `taskkill /T /F` as a fallback). `Exited{signal: KILL}`. |
+  | `WINCH` | Ignored; size changes go through `Resize`. |
+  | any other | `unsupported`. |
+- **Exit status:** `Exited{code}` is the process's own exit code. A server
+  that ended the process reports `Exited{signal}` with the signal it acted
+  on.
 - **End of stream:** an exec stream ends after `Exited` *and* the end of
   output. A server sends no output after `Exited`.
 - **Environment:** `env` is complete when `clear_env` is set. Otherwise it is
@@ -194,16 +229,29 @@ handles from that mount and carry a request `id`, so many can be in flight.
 | `Lookup`, `Forget`/`BatchForget`, `GetAttr`, `SetAttr` (mode, size, times) | `fs.link` (hard links) |
 | `ReadDirPlus` (entries with attributes, paged) | `fs.locks` (`GetLock`, `SetLock`, by owner) |
 | `Open`, `Read{handle, offset, size}`, `Write{handle, offset, bytes}`, `Flush`, `Fsync`, `Release` | `fs.compound` (`CreateAndWrite`, `ReadWhole`) |
-| `Create`, `Mkdir`, `Unlink`, `Rmdir`, `Rename{flags}`, `Symlink`, `ReadLink`, `StatFs` | `fs.strict-root` (confinement enforced by the kernel) |
+| `Create`, `Mkdir`, `Unlink`, `Rmdir`, `Rename{flags}`, `StatFs` | `fs.symlink` (`Symlink`, `ReadLink`); `fs.symlink-dangling` (to a missing target) |
+| | `fs.strict-root`, `fs.mode-bits`, `fs.ownership`, `fs.case-sensitive`, `fs.unlink-open`, `fs.rename-replace-open` (§7) |
 
 Rules:
 
 - **Names and paths are bytes**, not strings: POSIX names need not be UTF-8.
   A Windows server encodes UTF-16 names as WTF-8.
+- **Names the host cannot store:** a server maps the characters
+  `" * : < > ? \ |`, the control characters U+0001 to U+001F, and a
+  trailing `.` or space to U+F000 plus the character's code point (`foo:bar`
+  is stored as `foo\uF03Abar`), and maps them back when it reads names.
+  This is the scheme WSL and Cygwin use, so files stay readable to both. A
+  name it cannot map (`CON`, `NUL`, `COM1` …) is `EINVAL`, never `ENOENT`.
 - **Errors are Linux errno numbers**, whatever the server's OS, for example
-  `ENOENT` 2, `EACCES` 13, `EEXIST` 17, `EXDEV` 18, `EINVAL` 22, `ENOSPC`
-  28, `EROFS` 30, `ENOTEMPTY` 39, `ELOOP` 40. The numbers are fixed by this
-  spec, not taken from the host.
+  `EPERM` 1, `ENOENT` 2, `EACCES` 13, `EBUSY` 16 (a sharing violation),
+  `EEXIST` 17, `EXDEV` 18, `EINVAL` 22, `ENOSPC` 28, `EROFS` 30,
+  `ENOSYS` 38, `ENOTEMPTY` 39, `ELOOP` 40, `EOPNOTSUPP` 95. The numbers
+  are fixed by this spec, not taken from the host.
+- **Attributes report what is true.** `SetAttr` applies what the host
+  supports and its reply carries the resulting attributes. Without
+  `fs.mode-bits`, only the write bits are kept (on Windows, the read-only
+  attribute), and the reply shows the mode as it now is rather than the mode
+  asked for. Without `fs.ownership`, a change of uid or gid is `EPERM`.
 - **Inode identity:**
   - An inode number is stable for the life of a mount, and the server keeps it
     until the client's `Forget` count drops it to zero.
@@ -226,11 +274,25 @@ Rules:
 | `exec`, `exec.pty` | exec streams; with a PTY |
 | `exec.hold` | §5 hold and replay |
 | `fs`, `fs.write` | file streams; writable mounts |
+| `exec.pgroup` | signals reach the command's whole process group |
+| `exec.signals.posix` | every POSIX signal is delivered as itself (§5 table otherwise) |
 | `fs.link`, `fs.locks`, `fs.compound`, `fs.strict-root` | §6.2 |
+| `fs.symlink`, `fs.symlink-dangling` | symlinks; symlinks to missing targets (Windows fixes a link's file or directory type when it is created) |
+| `fs.mode-bits`, `fs.ownership` | all permission bits; uid and gid |
+| `fs.case-sensitive` | names differing only in case are different files (mount-wide in v1) |
+| `fs.unlink-open` | unlinking an open file removes the name while handles keep working |
+| `fs.rename-replace-open` | renaming over an open target replaces it atomically |
 
 A client that requires a capability refuses a server that does not grant it.
 It never degrades silently: a client that needs `fs.strict-root` refuses a
 best-effort server and says so.
+
+Capabilities describe behaviour, not operating systems: a client checks
+`fs.case-sensitive`, never "is this Windows". A Linux server grants almost
+all of them. A Windows server grants what its implementation reaches: needy's
+Rust executor reaches `fs.unlink-open` and `fs.rename-replace-open` through
+`FileDispositionInfoEx`/`FileRenameInfoEx` with POSIX semantics, which
+Node's `fs` does not expose (libuv renames with `MoveFileExW`).
 
 ## 8. Extensions
 
@@ -269,6 +331,10 @@ free of them.
 
 - A black-box suite drives a server through the stdio binding: core cases
   for every server, and capability cases only for what the server grants.
+  The core cases are the same on every operating system.
+- The suite also checks the negative side: an operation that needs a
+  capability the server did not grant must fail with the documented errno
+  or `unsupported`, never succeed partially or report success.
 - It lives in `xtask` at first (`cargo xtask boxide-conformance --server
   'CMD …'`, *provisional*) and moves with the protocol.
 - The suite ships with a minimal reference server in `xtask`, used only to
@@ -293,8 +359,9 @@ free of them.
    debugging goes through tools that decode frames.
 3. *Decided 2026-11-28 (owner):* needy's runner keeps its gRPC `Task` and
    `FsTask`; Boxide serves brokered executors only (§12).
-4. Windows: which semantics a Windows server must provide to pass the core
-   suite (POSIX rename over an open file is not available through
-   `MoveFileExW`).
+4. *Decided 2026-11-28 (owner):* platform differences are capabilities
+   (§7). The core suite is the same everywhere, invalid names map to U+F000,
+   and a server never reports a signal or an operation it did not carry out
+   (§5, §6.2, §11).
 5. Whether `exec.hold`'s snapshot is a terminal repaint (`Snapshot` bytes) or
    left to the client.
