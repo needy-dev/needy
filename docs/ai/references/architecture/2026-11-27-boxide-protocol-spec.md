@@ -211,8 +211,16 @@ Optional capability **`exec.hold`**:
 - The server keeps the process and its output after the stream or session
   drops, for a time it states in `Welcome`.
 - Output carries an absolute byte offset. `Open{attach: {process, offset}}`
-  resumes from that offset. If the offset has left the buffer, the server sends
-  `Snapshot{bytes}` (a terminal repaint) first.
+  resumes from that offset.
+- The server keeps only raw output bytes, in a buffer whose size it states in
+  `Welcome`. If the requested offset has left the buffer, the server first
+  sends `Gap{from, to}` naming the bytes that are lost, then resumes from the
+  oldest byte it still holds. The client decides what to show (for example
+  a notice, or a terminal reset).
+- TODO(boxide-snapshot): a server-side terminal repaint (a headless terminal
+  emulator serializing the screen, as Orca and VS Code do) is left out of v1.
+  It would make every server run a terminal emulator. Revisit as an optional
+  capability once a client needs a repaint that it cannot produce itself.
 
 ## 6. Files
 
@@ -363,5 +371,7 @@ free of them.
    (§7). The core suite is the same everywhere, invalid names map to U+F000,
    and a server never reports a signal or an operation it did not carry out
    (§5, §6.2, §11).
-5. Whether `exec.hold`'s snapshot is a terminal repaint (`Snapshot` bytes) or
+5. *Decided 2026-11-28 (owner):* `exec.hold` keeps raw bytes and reports
+   lost ranges with `Gap`; no server-side snapshot in v1 (§5). Previously:
+   whether `exec.hold`'s snapshot is a terminal repaint (`Snapshot` bytes) or
    left to the client.
