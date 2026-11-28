@@ -261,6 +261,21 @@ or an exec, for which the runner opens a **task stream**
 (`RunnerService.Task`) that carries the exec's own messages. A runner whose
 control stream is not open is *not connected*; tasks for it fail at once.
 
+### Boxide (proposed)
+
+A data-plane protocol between a client that wants commands run and files
+served and a server (a sandbox) that runs them on its machine: one
+**session** per connection, with **exec streams** and **file streams**
+opened inside it, flow-controlled end to end. It names nothing of needy
+(`proto/boxide/v1`, package `boxide.v1`) so that it can move to its own
+repository. Its **capabilities** (`exec.hold`, `fs.symlink`,
+`fs.case-sensitive`, …) say what a server's implementation does and are
+granted per session. They are not a runner's *Capabilities* above. needy's
+runner keeps its task streams; Boxide serves executors reached through a
+broker. See the
+[Boxide spec](ai/references/architecture/2026-11-27-boxide-protocol-spec.md)
+(proposed).
+
 ### Join token
 
 A short-lived secret an operator creates with `needy runner invite` and

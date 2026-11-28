@@ -1,0 +1,79 @@
+// Boxide v1 exec streams (spec §5).
+syntax = "proto3";
+
+package boxide.v1;
+
+message WindowSize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+// Opens an exec stream.
+message ExecStart {
+  repeated string argv = 1;
+  string cwd = 2;
+  // The whole environment when `clear_env` is set; otherwise added to the
+  // server's environment.
+  map<string, string> env = 3;
+  bool clear_env = 4;
+  // A PTY of this size; stdout and stderr are then one stream.
+  WindowSize tty = 5;
+  // Stdin is closed from the start.
+  bool no_stdin = 6;
+  map<string, bytes> extensions = 15;
+}
+
+// Reattaches to a held process (`exec.hold`) from an absolute output offset.
+message ExecAttach {
+  string process = 1;
+  uint64 offset = 2;
+}
+
+// Client → server on an exec stream.
+message ExecInput {
+  oneof body {
+    bytes stdin = 1;
+    bool stdin_eof = 2;
+    // A POSIX signal name without the `SIG` prefix (`INT`, `TERM`, `KILL`, …).
+    string signal = 3;
+    WindowSize resize = 4;
+  }
+}
+
+message ExecStarted {
+  // The OS process ID, for display.
+  int64 pid = 1;
+  // The server's handle for `ExecAttach`; empty without `exec.hold`.
+  string process = 2;
+}
+
+message ExecExited {
+  oneof status {
+    // The process's own exit code.
+    int32 code = 1;
+    // The signal that ended it, only when one did (spec §5).
+    string signal = 2;
+  }
+}
+
+// Output bytes that are lost: the requested offset had left the hold buffer.
+message ExecGap {
+  uint64 from = 1;
+  uint64 to = 2;
+}
+
+// Server → client on an exec stream.
+message ExecOutput {
+  // With `exec.hold`: the absolute offset of the first byte of `stdout` or
+  // `stderr` in this message, counted across both.
+  uint64 offset = 1;
+  oneof body {
+    ExecStarted started = 2;
+    bytes stdout = 3;
+    bytes stderr = 4;
+    ExecExited exited = 5;
+    ExecGap gap = 6;
+    // A signal the server could not deliver; the process keeps running.
+    string signal_unsupported = 7;
+  }
+}

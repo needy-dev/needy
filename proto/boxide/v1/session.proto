@@ -1,0 +1,139 @@
+// Boxide v1: a data-plane protocol between a client that wants commands run
+// and files served, and a server (a sandbox) that runs them on its machine.
+// Spec: docs/ai/references/architecture/2026-11-27-boxide-protocol-spec.md.
+//
+// NOTICE: this package must not import `needy.v1`. It lives in this
+// repository until it is stable and then moves to its own; the device-agent
+// copy is kept in sync by hand against `BOXIDE_PROTOCOL_VERSION` below.
+// BOXIDE_PROTOCOL_VERSION = 1.0
+syntax = "proto3";
+
+package boxide.v1;
+
+import "boxide/v1/exec.proto";
+import "boxide/v1/fs.proto";
+
+// The gRPC binding: one bidirectional stream per session. The stdio binding
+// writes a big-endian uint32 length before each `Frame`, and the WebSocket
+// binding sends one or more such length-prefixed frames per binary message;
+// neither uses this service.
+service BoxideService {
+  rpc Session(stream SessionRequest) returns (stream SessionResponse);
+}
+
+message SessionRequest {
+  Frame frame = 1;
+}
+
+message SessionResponse {
+  Frame frame = 1;
+}
+
+// One unit on the wire. Stream 0 is the session itself; other streams are
+// opened by `StreamOpen` (odd IDs by the client).
+message Frame {
+  uint32 stream = 1;
+  oneof body {
+    // Client → server, the first frame on stream 0.
+    Hello hello = 2;
+    // Server → client, the answer to `Hello`.
+    Welcome welcome = 3;
+    StreamOpen open = 4;
+    Credit credit = 5;
+    StreamClose close = 6;
+    Ping ping = 7;
+    Pong pong = 8;
+    ExecInput exec_input = 10;
+    ExecOutput exec_output = 11;
+    FsRequest fs_request = 12;
+    FsResponse fs_response = 13;
+  }
+  // Data the protocol does not define, under reverse-DNS keys. A peer
+  // ignores keys it does not understand.
+  map<string, bytes> extensions = 15;
+}
+
+message Version {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message Implementation {
+  string name = 1;
+  string version = 2;
+}
+
+message Hello {
+  // Versions the client speaks, most preferred first.
+  repeated Version versions = 1;
+  Implementation implementation = 2;
+  // Capabilities the client wants (spec §7).
+  repeated string capabilities = 3;
+  // Extension keys the client understands.
+  repeated string extensions = 4;
+  // Issued by whatever opened the stream for this pairing of client and
+  // server; the server refuses the session when it does not match. It guards
+  // against misrouting, not against the relay (spec §3.1).
+  bytes token = 5;
+  // The largest encoded `Frame` the client accepts; 0 means 1 MiB, the
+  // minimum (spec §4).
+  uint32 max_frame_bytes = 6;
+}
+
+message Welcome {
+  Version version = 1;
+  Implementation implementation = 2;
+  // The capabilities granted: those the client asked for that the server has.
+  repeated string capabilities = 3;
+  repeated string extensions = 4;
+  // How long the server waits after `TERM` before ending a process tree, for
+  // servers without `exec.signals.posix` (spec §5).
+  uint32 term_grace_ms = 5;
+  // With `exec.hold`: how long a held process outlives its session, and how
+  // many output bytes are kept for replay.
+  uint32 hold_ms = 6;
+  uint64 hold_buffer_bytes = 7;
+  // The largest encoded `Frame` the server accepts; 0 means 1 MiB.
+  uint32 max_frame_bytes = 8;
+}
+
+message StreamOpen {
+  oneof kind {
+    ExecStart exec = 1;
+    // Requires `exec.hold`.
+    ExecAttach attach = 2;
+    FsMount fs = 3;
+  }
+}
+
+// Grants the peer `bytes` more of data on this stream, or on stream 0 for
+// the whole session (spec §4).
+message Credit {
+  uint64 bytes = 1;
+}
+
+enum StatusCode {
+  STATUS_CODE_UNSPECIFIED = 0;
+  STATUS_CODE_OK = 1;
+  STATUS_CODE_CANCELLED = 2;
+  STATUS_CODE_INVALID = 3;
+  STATUS_CODE_NOT_FOUND = 4;
+  STATUS_CODE_PERMISSION = 5;
+  STATUS_CODE_UNSUPPORTED = 6;
+  STATUS_CODE_UNAVAILABLE = 7;
+  STATUS_CODE_INTERNAL = 8;
+}
+
+// Ends a stream, or the session when sent on stream 0.
+message StreamClose {
+  StatusCode code = 1;
+  string message = 2;
+}
+
+message Ping {
+  int64 timestamp_ms = 1;
+}
+
+message Pong {
+  int64 timestamp_ms = 1;
+}
