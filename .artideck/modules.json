@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "modules": [
+    {
+      "id": "executor-routing",
+      "name": "Executor routing",
+      "description": "How captured execs are decided, bound to runners and relayed, including brokers.",
+      "paths": ["crates/daemon/src/routing.rs", "crates/daemon/src/schedule.rs", "crates/daemon/src/runner*.rs", "docs/ai/references/architecture/2026-11-27-*"],
+      "aliases": ["routing", "bindings", "brokers"]
+    }
+  ]
+}
