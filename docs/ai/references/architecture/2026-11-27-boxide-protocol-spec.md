@@ -92,7 +92,10 @@ binding    gRPC bidi stream | WebSocket binary | stdio        (the transport)
 
 Every binding carries the same message, `Frame`:
 
-- **gRPC:** `service Boxide { rpc Session(stream Frame) returns (stream Frame); }`;
+- **gRPC:** `service BoxideService { rpc Session(stream SessionRequest)
+  returns (stream SessionResponse); }`, where each message wraps one `Frame`
+  (`frame = 1`). The wrapper satisfies Buf's STANDARD lint and adds nothing
+  else;
 - **WebSocket:** one binary message per `Frame`, at most 1 MiB;
 - **stdio:** a big-endian `uint32` length, then one `Frame`.
 
@@ -119,7 +122,9 @@ outside the session.
   future optional capability, `secure.e2e` *(provisional)*, for example Noise
   or TLS inside the binding. It is not part of v1.
 
-## 4. Session and frames *(provisional shapes)*
+## 4. Session and frames
+
+The schema is in `proto/boxide/v1/session.proto`; in outline:
 
 ```proto
 message Frame {
@@ -127,12 +132,12 @@ message Frame {
   oneof body {
     Hello hello = 2;           // client → server, first frame on stream 0
     Welcome welcome = 3;       // server → client
-    Open open = 4;             // open a logical stream (exec or fs)
+    StreamOpen open = 4;       // open a stream: ExecStart, ExecAttach or FsMount
     Credit credit = 5;         // grant bytes on a stream
-    Close close = 6;           // end a stream, with a status
+    StreamClose close = 6;     // end a stream (or the session), with a StatusCode
     Ping ping = 7;  Pong pong = 8;
-    ExecClientMessage exec_client = 10;
-    ExecServerMessage exec_server = 11;
+    ExecInput exec_input = 10;    // client → server on an exec stream
+    ExecOutput exec_output = 11;  // server → client on an exec stream
     FsRequest fs_request = 12;
     FsResponse fs_response = 13;
   }
@@ -145,7 +150,9 @@ message Frame {
     its implementation's name and version, the capabilities it wants, the
     extensions it understands, and the session `token` (§3.1).
   - `Welcome` returns the version chosen, the capabilities granted (the
-    intersection) and the server's implementation.
+    intersection) and the server's implementation, plus the server's `TERM`
+    grace period (§5) and, with `exec.hold`, how long it holds a process and
+    how many output bytes it keeps.
   - A server with no common major version answers with `Close` and a reason.
 - **Streams:**
   - Odd stream IDs are opened by the client and even ones by the server
@@ -160,26 +167,28 @@ message Frame {
     (apiserver-network-proxy #881).
 - **Liveness:** `Ping` every 15 s. Three missed `Pong`s end the session.
   Bindings may add their own keepalive.
-- **Errors:** `Close.status` uses a closed set of codes (`ok`, `cancelled`,
+- **Errors:** `StreamClose.code` uses a closed set of codes (`ok`, `cancelled`,
   `invalid`, `not_found`, `permission`, `unsupported`, `unavailable`,
   `internal`) and a message. File errors use errno values in `FsResponse`
   (§6.2).
 
 ## 5. Exec
 
-A client opens an exec stream with `Open{exec: Start}`:
+A client opens an exec stream with `StreamOpen{exec: ExecStart}` and then
+sends `ExecInput` and receives `ExecOutput` (`proto/boxide/v1/exec.proto`):
 
 | Client → server | Server → client |
 | --- | --- |
-| `Start{argv, cwd, env, clear_env, tty{rows, cols}?, stdin: open/closed}` | `Started{pid}` |
-| `Stdin{bytes}`, `StdinEof` | `Stdout{bytes}`, `Stderr{bytes}` (one stream when `tty` is set) |
-| `Signal{name}` (POSIX names: `INT`, `TERM`, `KILL`, `HUP`, `QUIT`, `USR1`, `USR2`, `WINCH`, …) | `Exited{code}` or `Exited{signal}` |
-| `Resize{rows, cols}` | `Error{status}` |
+| `StreamOpen{exec: ExecStart{argv, cwd, env, clear_env, tty{rows, cols}?, no_stdin}}` | `ExecOutput.started{pid, process}` |
+| `ExecInput.stdin`, `ExecInput.stdin_eof` | `ExecOutput.stdout`, `ExecOutput.stderr` (one stream when `tty` is set) |
+| `ExecInput.signal` (POSIX names without `SIG`: `INT`, `TERM`, `KILL`, `HUP`, …) | `ExecOutput.exited{code}` or `ExecOutput.exited{signal}`; `ExecOutput.signal_unsupported` |
+| `ExecInput.resize{rows, cols}` | `StreamClose{code}` when the stream fails (for example the program cannot start) |
 
 Rules:
 
-- **Never report what did not happen.** A server answers a `Signal` it cannot
-  deliver as asked with `unsupported` and leaves the process running. It
+- **Never report what did not happen.** A server answers a signal it cannot
+  deliver as asked with `ExecOutput.signal_unsupported` and leaves the process
+  running. It
   does not turn the signal into something else unless the table below says
   so, and it never ends a process because of a signal it does not support.
   `Exited{signal}` names a signal only when one really ended the process.
@@ -210,11 +219,11 @@ Optional capability **`exec.hold`**:
 
 - The server keeps the process and its output after the stream or session
   drops, for a time it states in `Welcome`.
-- Output carries an absolute byte offset. `Open{attach: {process, offset}}`
+- Output carries an absolute byte offset. `StreamOpen{attach: ExecAttach{process, offset}}`
   resumes from that offset.
 - The server keeps only raw output bytes, in a buffer whose size it states in
   `Welcome`. If the requested offset has left the buffer, the server first
-  sends `Gap{from, to}` naming the bytes that are lost, then resumes from the
+  sends `ExecGap{from, to}` naming the bytes that are lost, then resumes from the
   oldest byte it still holds. The client decides what to show (for example
   a notice, or a terminal reset).
 - TODO(boxide-snapshot): a server-side terminal repaint (a headless terminal
@@ -226,8 +235,10 @@ Optional capability **`exec.hold`**:
 
 ### 6.1 Session
 
-`Open{fs: Mount{root, read_only, lock_mode}}` returns the root inode and the
-file capabilities granted. All later requests on the stream name inodes and
+`StreamOpen{fs: FsMount{root, read_only, lock_mode}}` opens a file stream on
+the server directory `root` (bytes; the server decides which roots it serves).
+The first response, `FsMounted`, returns the root inode and the file
+capabilities granted for this mount. All later requests on the stream name inodes and
 handles from that mount and carry a request `id`, so many can be in flight.
 
 ### 6.2 Operations
@@ -238,6 +249,7 @@ handles from that mount and carry a request `id`, so many can be in flight.
 | `ReadDirPlus` (entries with attributes, paged) | `fs.locks` (`GetLock`, `SetLock`, by owner) |
 | `Open`, `Read{handle, offset, size}`, `Write{handle, offset, bytes}`, `Flush`, `Fsync`, `Release` | `fs.compound` (`CreateAndWrite`, `ReadWhole`) |
 | `Create`, `Mkdir`, `Unlink`, `Rmdir`, `Rename{flags}`, `StatFs` | `fs.symlink` (`Symlink`, `ReadLink`); `fs.symlink-dangling` (to a missing target) |
+| | `fs.prefetch-tree` (`FsPrefetchTree`: directory listings several levels deep in one round trip) |
 | | `fs.strict-root`, `fs.mode-bits`, `fs.ownership`, `fs.case-sensitive`, `fs.unlink-open`, `fs.rename-replace-open` (§7) |
 
 Rules:
@@ -284,7 +296,7 @@ Rules:
 | `fs`, `fs.write` | file streams; writable mounts |
 | `exec.pgroup` | signals reach the command's whole process group |
 | `exec.signals.posix` | every POSIX signal is delivered as itself (§5 table otherwise) |
-| `fs.link`, `fs.locks`, `fs.compound`, `fs.strict-root` | §6.2 |
+| `fs.link`, `fs.locks`, `fs.compound`, `fs.prefetch-tree`, `fs.strict-root` | §6.2 |
 | `fs.symlink`, `fs.symlink-dangling` | symlinks; symlinks to missing targets (Windows fixes a link's file or directory type when it is created) |
 | `fs.mode-bits`, `fs.ownership` | all permission bits; uid and gid |
 | `fs.case-sensitive` | names differing only in case are different files (mount-wide in v1) |
