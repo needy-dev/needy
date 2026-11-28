@@ -119,6 +119,8 @@ outside the session.
   checks before it sends `Welcome`. The system that opens streams issues it
   for one pairing of client and server, so a stream connected to the wrong
   server fails at once. It guards against misrouting, not against the relay.
+  A client that launches the server itself over the stdio binding (through
+  `ssh`, say) is paired with it by the launch; see question 9 (§13).
 - **Confidentiality** comes from the transport: for example TLS between
   each peer and a relay. In v1 a relay can read frames. Deployments whose
   relay is already trusted to act on the server need nothing more.
@@ -167,14 +169,22 @@ message Frame {
     (reserved: the server opens none in v1).
   - Within a stream, frames are ordered. Across streams, nothing is ordered.
 - **Flow control:**
-  - Each stream has a byte credit in each direction, 256 KiB to start, and
-    the session has one more, 1 MiB to start, that all streams share. A
-    `Credit` on stream 0 grants session credit; on any other stream, that
-    stream's.
+  - Each stream starts with as much credit in each direction as the
+    receiver's frame limit, and the session with twice that, shared by all
+    its streams. A `Credit` on stream 0 grants session credit; on any
+    other stream, that stream's.
   - Data counts against both: `stdin`, `stdout` and `stderr` bytes on an
-    exec stream, and the encoded size of each `FsRequest` and `FsResponse`
-    on a file stream. The receiver returns `Credit` as it consumes. Control
-    frames (`Open`, `Credit`, `Close`, `Ping`, `Pong`) are not counted.
+    exec stream, and on a file stream the encoded size of the `FsRequest` or
+    `FsResponse` message itself, not of the `Frame` around it. Both sides
+    count exactly these bytes; a sender and a receiver that count
+    differently drift apart until the stream stalls. The receiver returns
+    `Credit` as it consumes. Control frames (`Open`, `Credit`, `Close`,
+    `Ping`, `Pong`) are not counted.
+  - NOTICE: an earlier draft started streams at 256 KiB and the session at
+    1 MiB. A file response cannot be split and may be as large as the
+    frame limit (at least 1 MiB), so a sender holding 256 KiB could never
+    send it. The first implementations hit this (2026-11-28); a window at
+    least as large as one frame is what keeps every frame sendable.
   - A receiver may grant more than it was granted at the start, to fit the
     path's bandwidth-delay product: it measures the round trip with `Ping`
     and grows a window that is used up within one round trip, as HTTP/2
@@ -187,7 +197,7 @@ message Frame {
   - NOTICE: needy's own gRPC runs with 16 MiB stream and 32 MiB
     connection windows on HTTP/2 (`crates/api-client/src/lib.rs`,
     `crates/api-server/src/server.rs`, v0.0.26), because a 256 KiB window
-    caps a 100 ms path near 2.5 MiB/s. Boxide starts small
+    caps a 100 ms path near 2.5 MiB/s. Boxide starts at one frame
     for relays and grows by measurement instead of fixing large windows.
 - **Liveness:** `Ping` every 15 s. Three missed `Pong`s end the session.
   Bindings may add their own keepalive.
@@ -234,8 +244,16 @@ Rules:
 - **Exit status:** `Exited{code}` is the process's own exit code. A server
   that ended the process reports `Exited{signal}` with the signal it acted
   on.
+- **Started means started:** a server sends `started` only once the
+  program runs. A program that cannot start (it does not exist, it is not
+  executable, the `cwd` is not a directory) is a `StreamClose{not_found}`
+  instead, and no `started` comes first, so a client can tell a command
+  that never ran from one that failed.
 - **End of stream:** an exec stream ends after `Exited` *and* the end of
   output. A server sends no output after `Exited`.
+- **A client that leaves:** when the client closes an exec stream, or the
+  session ends, without `exec.hold` the server ends the command's process
+  tree as for `KILL`.
 - **Environment:** `env` is complete when `clear_env` is set. Otherwise it is
   added to the server's environment.
 
@@ -266,8 +284,9 @@ capabilities granted for this mount. All later requests on the stream name inode
 handles from that mount and carry a request `id`, so many can be in flight.
 
 `FsMounted.max_io_bytes` is the largest `Read.size` and `Write.data` the
-server accepts on the mount, chosen so the reply fits the client's frame
-limit (§4). A client splits a larger read or write into several requests
+server accepts on the mount. A read's reply travels to the client and a
+write's request to the server, so the server chooses it below *both*
+frame limits (§4), with room for the rest of the message. A client splits a larger read or write into several requests
 in flight at once. A server answers a `Read` with every byte asked for
 unless the file ends first, so a client never takes a short read for the
 end of the file.
@@ -433,6 +452,25 @@ free of them.
 
 - needy's daemon is a Boxide client, over the length-prefixed binding inside
   broker streams (broker spec §6.3).
+- *Experiment (2026-11-28, not a support claim):* an executor with
+  `boxide: { command: [...] }` *(provisional)* has the daemon launch a
+  server and speak the stdio binding to it, before brokers exist. Evidence
+  level: one local run on an Apple silicon Mac, a `macos-vz` actor whose
+  workspace and routed commands were served by a TypeScript server through
+  the daemon's translation of needy's process and file sessions. Nothing
+  else (Linux actors, relays, Windows servers) was run.
+- What needy's own sessions carry that Boxide does not, found by that
+  translation:
+  - needy has no message for a signal the server could not deliver
+    (`signal_unsupported`), no field for a prefetch's `unvisited`
+    directories, and no attribute validity (`valid_ms`).
+  - needy names files with strings, so a name that is not UTF-8 is left
+    out of listings.
+  - A Boxide server knows no runs: process ids, `ListProcesses`,
+    `KillProcess` and the `max_procs` limit are the client's.
+  - needy's routing retries a missing absolute program by its bare name on
+    the server's `PATH` (`search_path_if_missing`); the client does that
+    retry.
 - needy's existing `RunnerService.Task`, `RunnerService.FsTask` and
   `FsService.Session` stay as they are. Boxide is used for brokered
   executors only; needy's runner is not migrated (owner, 2026-11-28).
@@ -460,3 +498,24 @@ free of them.
    reads, writes and listings split to fit (§4, §6.1, §6.2); a session
    credit next to stream credits, and windows that grow by measurement
    (§4); several frames per WebSocket message (§3); and `fs.resume` (§6.1).
+7. *Open (2026-11-28):* what `stdin_eof` means on a PTY. A PTY has no end
+   of input; the first server writes `^D`, which ends input only for a
+   program in canonical mode.
+8. *Open (2026-11-28):* whether `Welcome` reports the server user's home
+   directory. needy expands `~` in an executor's paths and workspace with
+   it; without it, a Boxide executor needs absolute paths.
+9. *Open (2026-11-28):* whether the stdio binding may use an empty session
+   token when the client launched the server itself (the first
+   implementations do), or whether the launcher must pass one.
+10. *Open (2026-11-28):* `Rename` flags on a server without `renameat2`.
+    Node has none, so the first server checks for the target before it
+    renames (`RENAME_NOREPLACE`, racy) and refuses `RENAME_EXCHANGE`. A
+    capability (`fs.rename-noreplace`, provisional) would let a server say
+    it cannot do it atomically.
+11. *Open (2026-11-28):* a `boxide.command` executor runs a command of the
+    profile's on the control host. That is fine for a developer's own
+    daemon and not for a shared control plane, which must refuse it (as
+    `--disable-host-files` refuses host mappings) and use brokers.
+12. *Open (2026-11-28):* what a server reports for a device, FIFO or
+    socket. `FsFileType` has regular files, directories and symlinks only;
+    the first server reports the others as regular files.
