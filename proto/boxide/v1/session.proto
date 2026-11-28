@@ -13,9 +13,10 @@ package boxide.v1;
 import "boxide/v1/exec.proto";
 import "boxide/v1/fs.proto";
 
-// The gRPC binding: one bidirectional stream per session. The WebSocket
-// binding sends one `Frame` per binary message and the stdio binding a
-// big-endian uint32 length before each `Frame`; neither uses this service.
+// The gRPC binding: one bidirectional stream per session. The stdio binding
+// writes a big-endian uint32 length before each `Frame`, and the WebSocket
+// binding sends one or more such length-prefixed frames per binary message;
+// neither uses this service.
 service BoxideService {
   rpc Session(stream SessionRequest) returns (stream SessionResponse);
 }
@@ -74,6 +75,9 @@ message Hello {
   // server; the server refuses the session when it does not match. It guards
   // against misrouting, not against the relay (spec §3.1).
   bytes token = 5;
+  // The largest encoded `Frame` the client accepts; 0 means 1 MiB, the
+  // minimum (spec §4).
+  uint32 max_frame_bytes = 6;
 }
 
 message Welcome {
@@ -89,6 +93,8 @@ message Welcome {
   // many output bytes are kept for replay.
   uint32 hold_ms = 6;
   uint64 hold_buffer_bytes = 7;
+  // The largest encoded `Frame` the server accepts; 0 means 1 MiB.
+  uint32 max_frame_bytes = 8;
 }
 
 message StreamOpen {
@@ -100,7 +106,8 @@ message StreamOpen {
   }
 }
 
-// Grants the peer `bytes` more of data on this stream (spec §4).
+// Grants the peer `bytes` more of data on this stream, or on stream 0 for
+// the whole session (spec §4).
 message Credit {
   uint64 bytes = 1;
 }

@@ -168,6 +168,10 @@ pub struct FsMount {
     pub read_only: bool,
     #[prost(enumeration="FsLockMode", tag="3")]
     pub lock_mode: i32,
+    /// With `fs.resume`: the token of a dropped mount to take up again
+    /// (spec §6.1). `root`, `read_only` and `lock_mode` are then ignored.
+    #[prost(bytes="vec", tag="4")]
+    pub resume: ::prost::alloc::vec::Vec<u8>,
     #[prost(map="string, bytes", tag="15")]
     pub extensions: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::vec::Vec<u8>>,
 }
@@ -185,6 +189,17 @@ pub struct FsMounted {
     /// `fs.case-sensitive` or `fs.rename-replace-open`.
     #[prost(string, repeated, tag="5")]
     pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The largest `FsRead.size` and `FsWrite.data` the server accepts.
+    #[prost(uint32, tag="6")]
+    pub max_io_bytes: u32,
+    /// With `fs.resume`: the token to resume this mount with, how long the
+    /// server keeps it after a drop, and whether this answer resumed one.
+    #[prost(bytes="vec", tag="7")]
+    pub resume: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag="8")]
+    pub resume_ms: u32,
+    #[prost(bool, tag="9")]
+    pub resumed: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FsLookup {
@@ -540,6 +555,10 @@ pub struct FsPrefetchDir {
 pub struct FsPrefetchTreeReply {
     #[prost(message, repeated, tag="1")]
     pub dirs: ::prost::alloc::vec::Vec<FsPrefetchDir>,
+    /// Directories reached but not listed because the reply would not fit a
+    /// frame; a client continues from them.
+    #[prost(uint64, repeated, tag="2")]
+    pub unvisited: ::prost::alloc::vec::Vec<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FsError {
@@ -850,6 +869,10 @@ pub struct Hello {
     /// against misrouting, not against the relay (spec §3.1).
     #[prost(bytes="vec", tag="5")]
     pub token: ::prost::alloc::vec::Vec<u8>,
+    /// The largest encoded `Frame` the client accepts; 0 means 1 MiB, the
+    /// minimum (spec §4).
+    #[prost(uint32, tag="6")]
+    pub max_frame_bytes: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Welcome {
@@ -872,6 +895,9 @@ pub struct Welcome {
     pub hold_ms: u32,
     #[prost(uint64, tag="7")]
     pub hold_buffer_bytes: u64,
+    /// The largest encoded `Frame` the server accepts; 0 means 1 MiB.
+    #[prost(uint32, tag="8")]
+    pub max_frame_bytes: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StreamOpen {
@@ -891,7 +917,8 @@ pub mod stream_open {
         Fs(super::FsMount),
     }
 }
-/// Grants the peer `bytes` more of data on this stream (spec §4).
+/// Grants the peer `bytes` more of data on this stream, or on stream 0 for
+/// the whole session (spec §4).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Credit {
     #[prost(uint64, tag="1")]

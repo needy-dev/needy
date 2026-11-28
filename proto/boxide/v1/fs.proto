@@ -55,6 +55,9 @@ message FsMount {
   bytes root = 1;
   bool read_only = 2;
   FsLockMode lock_mode = 3;
+  // With `fs.resume`: the token of a dropped mount to take up again
+  // (spec §6.1). `root`, `read_only` and `lock_mode` are then ignored.
+  bytes resume = 4;
   map<string, bytes> extensions = 15;
 }
 
@@ -66,6 +69,13 @@ message FsMounted {
   // The file capabilities granted for this mount (spec §7), such as
   // `fs.case-sensitive` or `fs.rename-replace-open`.
   repeated string capabilities = 5;
+  // The largest `FsRead.size` and `FsWrite.data` the server accepts.
+  uint32 max_io_bytes = 6;
+  // With `fs.resume`: the token to resume this mount with, how long the
+  // server keeps it after a drop, and whether this answer resumed one.
+  bytes resume = 7;
+  uint32 resume_ms = 8;
+  bool resumed = 9;
 }
 
 message FsLookup {
@@ -306,6 +316,9 @@ message FsPrefetchDir {
 
 message FsPrefetchTreeReply {
   repeated FsPrefetchDir dirs = 1;
+  // Directories reached but not listed because the reply would not fit a
+  // frame; a client continues from them.
+  repeated uint64 unvisited = 2;
 }
 
 message FsError {
