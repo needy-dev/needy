@@ -181,7 +181,7 @@ impl AttrCache {
     if entry.fetched_at.elapsed() >= ttl {
       return None;
     }
-    Some(entry.attr.clone())
+    Some(entry.attr)
   }
 
   async fn insert(&self, attr: FsAttr) {
@@ -203,7 +203,7 @@ impl AttrCache {
           entries.insert(
             attr.ino,
             AttrCacheEntry {
-              attr: attr.clone(),
+              attr: *attr,
               fetched_at: now,
             },
           );
@@ -440,21 +440,21 @@ impl DirCache {
     loop {
       let wait_notify = {
         let mut inner = self.inner.lock().await;
-        if let Some(existing) = inner.entries.get_mut(&parent) {
-          if existing.fetched_at.elapsed() < ttl {
-            if is_prefetch {
-              return Ok(existing.entries.clone());
-            }
-            let all_available = existing.ref_available.iter().all(|a| *a);
-            let none_available = existing.ref_available.iter().all(|a| !a);
-            if all_available && offset == 0 {
-              // Hand off all prefetched nlookup=1 references to the kernel.
-              existing.ref_available.fill(false);
-              return Ok(existing.entries.clone());
-            }
-            if none_available && offset > 0 {
-              return Ok(existing.entries.clone());
-            }
+        if let Some(existing) = inner.entries.get_mut(&parent)
+          && existing.fetched_at.elapsed() < ttl
+        {
+          if is_prefetch {
+            return Ok(existing.entries.clone());
+          }
+          let all_available = existing.ref_available.iter().all(|a| *a);
+          let none_available = existing.ref_available.iter().all(|a| !a);
+          if all_available && offset == 0 {
+            // Hand off all prefetched nlookup=1 references to the kernel.
+            existing.ref_available.fill(false);
+            return Ok(existing.entries.clone());
+          }
+          if none_available && offset > 0 {
+            return Ok(existing.entries.clone());
           }
         }
         if let Some(notify) = inner.in_flight.get(&parent) {
@@ -948,7 +948,7 @@ impl Filesystem for NeedyFs {
     match self.client.lookup(parent, name.clone()).await {
       Ok(entry) => {
         let attr = entry.attr.ok_or_else(|| Errno::from(libc::EIO))?;
-        self.attr_cache.insert(attr.clone()).await;
+        self.attr_cache.insert(attr).await;
         Ok(ReplyEntry {
           ttl: self.config.entry_ttl,
           attr: self.to_file_attr(&attr),
@@ -996,7 +996,7 @@ impl Filesystem for NeedyFs {
       });
     }
     let attr = self.client.getattr(inode, remote_fh).await.map_err(Errno::from)?;
-    self.attr_cache.insert(attr.clone()).await;
+    self.attr_cache.insert(attr).await;
     Ok(ReplyAttr {
       ttl: self.config.attr_ttl,
       attr: self.to_file_attr(&attr),
@@ -1025,7 +1025,7 @@ impl Filesystem for NeedyFs {
       mtime_nsec: set_attr.mtime.map(|t| t.nsec),
     };
     let attr = self.client.setattr(req).await.map_err(Errno::from)?;
-    self.attr_cache.insert(attr.clone()).await;
+    self.attr_cache.insert(attr).await;
     Ok(ReplyAttr {
       ttl: self.config.attr_ttl,
       attr: self.to_file_attr(&attr),
@@ -1585,7 +1585,6 @@ mod tests {
               nlink: 1,
               uid: 1000,
               gid: 1000,
-              rdev: 0,
               blksize: 4096,
             }),
             generation: 1,
@@ -1600,7 +1599,7 @@ mod tests {
         };
         let _ = resp_tx
           .send(Ok(SessionResponse {
-            request_id: req.request_id,
+            id: req.id,
             body: Some(body),
           }))
           .await;

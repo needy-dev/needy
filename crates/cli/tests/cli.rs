@@ -2842,7 +2842,11 @@ impl HeldJoin {
     };
     runtime.spawn(
       tonic::transport::Server::builder()
-        .add_service(RunnerServiceServer::new(held))
+        .add_service(
+          RunnerServiceServer::new(held)
+            .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(tonic::codec::CompressionEncoding::Gzip),
+        )
         .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener)),
     );
     Self {

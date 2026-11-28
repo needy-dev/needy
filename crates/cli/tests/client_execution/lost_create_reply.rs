@@ -96,10 +96,14 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       runs: daemon.clone(),
       caller: Caller::Operator,
     }))
-    .add_service(RunnerServiceServer::new(runner::Adapter {
-      runners: daemon.clone(),
-      caller: Caller::Operator,
-    }))
+    .add_service(
+      RunnerServiceServer::new(runner::Adapter {
+        runners: daemon.clone(),
+        caller: Caller::Operator,
+      })
+      .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+      .send_compressed(tonic::codec::CompressionEncoding::Gzip),
+    )
     .add_service(ProcessServiceServer::new(process::Adapter {
       processes: daemon.clone(),
       caller: Caller::Operator,
