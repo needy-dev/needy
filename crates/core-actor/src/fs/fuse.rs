@@ -5,7 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -43,6 +43,10 @@ const READDIRPLUS_BATCH_SIZE: u32 = 512;
 const PREFETCH_TREE_MAX_DEPTH: u32 = 5;
 /// Maximum directories requested in a single batched `PrefetchTree` RPC.
 const PREFETCH_TREE_MAX_DIRS: u32 = 3500;
+/// Maximum individual file size inlined in `PrefetchTree` (32 KiB).
+const PREFETCH_INLINE_FILE_BYTES: u32 = 32 * 1024;
+/// Maximum total inlined bytes across one `PrefetchTree` reply (4 MiB).
+const PREFETCH_INLINE_TOTAL_BYTES: u32 = 4 * 1024 * 1024;
 /// Fallback depth when the executor does not support `PrefetchTree`.
 const PREFETCH_FALLBACK_MAX_DEPTH: usize = 2;
 /// Maximum concurrent `ReadDirPlus` RPCs during fallback metadata prefetch.
@@ -50,10 +54,14 @@ const PREFETCH_CONCURRENCY: usize = 16;
 /// Maximum number of directories warmed during fallback prefetch.
 const PREFETCH_FALLBACK_MAX_DIRS: usize = 256;
 
+/// High bit marking a local-only read handle served from [`SmallFileCache`]
+/// with zero remote `open`/`read`/`release` round trips.
+const LOCAL_CACHE_FH_BIT: u64 = 1 << 63;
+
 /// Directory names skipped during background metadata prefetch to avoid
-/// warming huge dependency or VCS trees.
+/// warming huge dependency trees. (`.git` top-level is allowed and its heavy
+/// internal subtrees are filtered on the executor.)
 const PREFETCH_SKIP_DIRS: &[&str] = &[
-  ".git",
   "node_modules",
   "target",
   "dist",
@@ -64,6 +72,193 @@ const PREFETCH_SKIP_DIRS: &[&str] = &[
   ".venv",
   "vendor",
 ];
+
+struct SmallFileEntry {
+  data: Bytes,
+  fetched_at: Instant,
+}
+
+/// Bounded TTL cache of inlined read-only small files populated by
+/// `PrefetchTree` and invalidated on any local write or attribute mutation.
+struct SmallFileCache {
+  files: Mutex<HashMap<u64, SmallFileEntry>>,
+  handles: Mutex<HashMap<u64, Bytes>>,
+  next_fh: AtomicU64,
+}
+
+impl SmallFileCache {
+  fn new() -> Self {
+    Self {
+      files: Mutex::new(HashMap::new()),
+      handles: Mutex::new(HashMap::new()),
+      next_fh: AtomicU64::new(1),
+    }
+  }
+
+  fn is_local_fh(fh: u64) -> bool {
+    (fh & LOCAL_CACHE_FH_BIT) != 0
+  }
+
+  async fn insert_batch(&self, items: Vec<needy_api_proto::v1::FsPrefetchFileData>) {
+    if items.is_empty() {
+      return;
+    }
+    let mut files = self.files.lock().await;
+    let now = Instant::now();
+    for item in items {
+      files.insert(
+        item.ino,
+        SmallFileEntry {
+          data: Bytes::from(item.data),
+          fetched_at: now,
+        },
+      );
+    }
+  }
+
+  async fn try_open_readonly(&self, ino: u64, ttl: Duration) -> Option<u64> {
+    let data = {
+      let mut files = self.files.lock().await;
+      let entry = files.get(&ino)?;
+      if entry.fetched_at.elapsed() >= ttl {
+        files.remove(&ino);
+        return None;
+      }
+      entry.data.clone()
+    };
+    let fh = LOCAL_CACHE_FH_BIT | self.next_fh.fetch_add(1, Ordering::Relaxed);
+    self.handles.lock().await.insert(fh, data);
+    Some(fh)
+  }
+
+  async fn read(&self, fh: u64, offset: u64, size: u32) -> Option<Bytes> {
+    let handles = self.handles.lock().await;
+    let data = handles.get(&fh)?;
+    let start = usize::try_from(offset).unwrap_or(usize::MAX);
+    if start >= data.len() {
+      return Some(Bytes::new());
+    }
+    let end = start.saturating_add(size as usize).min(data.len());
+    Some(data.slice(start..end))
+  }
+
+  async fn release(&self, fh: u64) {
+    self.handles.lock().await.remove(&fh);
+  }
+
+  async fn invalidate(&self, ino: u64) {
+    self.files.lock().await.remove(&ino);
+  }
+
+  async fn clear(&self) {
+    self.files.lock().await.clear();
+    self.handles.lock().await.clear();
+  }
+}
+
+/// Bounded TTL cache of `FsAttr` values populated by `PrefetchTree`,
+/// `readdirplus`, `lookup`, and `getattr`, avoiding redundant WAN `GetAttr`
+/// round trips (such as `fstat(fd)` right after `open()`).
+struct AttrCacheEntry {
+  attr: FsAttr,
+  fetched_at: Instant,
+}
+
+struct AttrCache {
+  entries: Mutex<HashMap<u64, AttrCacheEntry>>,
+}
+
+impl AttrCache {
+  fn new() -> Self {
+    Self {
+      entries: Mutex::new(HashMap::new()),
+    }
+  }
+
+  async fn get(&self, ino: u64, ttl: Duration) -> Option<FsAttr> {
+    let entries = self.entries.lock().await;
+    let entry = entries.get(&ino)?;
+    if entry.fetched_at.elapsed() >= ttl {
+      return None;
+    }
+    Some(entry.attr.clone())
+  }
+
+  async fn insert(&self, attr: FsAttr) {
+    self.entries.lock().await.insert(
+      attr.ino,
+      AttrCacheEntry {
+        attr,
+        fetched_at: Instant::now(),
+      },
+    );
+  }
+
+  async fn insert_from_dirs(&self, dirs: &[needy_api_proto::v1::FsPrefetchDir]) {
+    let mut entries = self.entries.lock().await;
+    let now = Instant::now();
+    for dir in dirs {
+      for item in &dir.entries {
+        if let Some(attr) = &item.attr {
+          entries.insert(
+            attr.ino,
+            AttrCacheEntry {
+              attr: attr.clone(),
+              fetched_at: now,
+            },
+          );
+        }
+      }
+    }
+  }
+
+  async fn invalidate(&self, ino: u64) {
+    self.entries.lock().await.remove(&ino);
+  }
+
+  async fn clear(&self) {
+    self.entries.lock().await.clear();
+  }
+}
+
+/// Coordinates initial `PrefetchTree` completion so early `lookup`/`readdirplus`
+/// calls briefly coalesce onto the single batched prefetch instead of racing
+/// ahead with serial WAN RPCs.
+struct PrefetchGate {
+  pending: AtomicBool,
+  notify: Notify,
+}
+
+impl PrefetchGate {
+  fn new() -> Self {
+    Self {
+      pending: AtomicBool::new(false),
+      notify: Notify::new(),
+    }
+  }
+
+  fn begin(&self) {
+    self.pending.store(true, Ordering::Release);
+  }
+
+  fn finish(&self) {
+    self.pending.store(false, Ordering::Release);
+    self.notify.notify_waiters();
+  }
+
+  async fn wait_briefly(&self) {
+    if !self.pending.load(Ordering::Acquire) {
+      return;
+    }
+    let notified = self.notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if !self.pending.load(Ordering::Acquire) {
+      return;
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(2), notified).await;
+  }
+}
 
 struct DirCacheEntry {
   entries: Vec<FsDirEntry>,
@@ -342,21 +537,38 @@ impl DirCache {
 /// Prefers a single batched `PrefetchTree` RPC (warming up to 5 levels / 3,500
 /// directories in one round trip) and falls back to concurrent per-directory
 /// `ReadDirPlus` against older executors.
-fn spawn_metadata_prefetch(client: Arc<FsRpcClient>, dir_cache: Arc<DirCache>, case_insensitive: bool, ttl: Duration) {
+fn spawn_metadata_prefetch(
+  client: Arc<FsRpcClient>,
+  dir_cache: Arc<DirCache>,
+  small_files: Arc<SmallFileCache>,
+  attr_cache: Arc<AttrCache>,
+  prefetch_gate: Arc<PrefetchGate>,
+  case_insensitive: bool,
+  ttl: Duration,
+) {
   let cancel = client.cancelled();
+  prefetch_gate.begin();
   tokio::spawn(async move {
     if cancel.is_cancelled() {
+      prefetch_gate.finish();
       return;
     }
     let skip_names: Vec<String> = PREFETCH_SKIP_DIRS.iter().map(|&s| s.to_owned()).collect();
-    match client.prefetch_tree(1, PREFETCH_TREE_MAX_DEPTH, PREFETCH_TREE_MAX_DIRS, skip_names).await {
+    match client
+      .prefetch_tree(1, PREFETCH_TREE_MAX_DEPTH, PREFETCH_TREE_MAX_DIRS, skip_names, PREFETCH_INLINE_FILE_BYTES, PREFETCH_INLINE_TOTAL_BYTES)
+      .await
+    {
       Ok(reply) => {
         if !cancel.is_cancelled() {
+          attr_cache.insert_from_dirs(&reply.dirs).await;
           dir_cache.insert_prefetched_tree(&client, reply.dirs, case_insensitive).await;
+          small_files.insert_batch(reply.files).await;
         }
+        prefetch_gate.finish();
         return;
       }
       Err(errno) => {
+        prefetch_gate.finish();
         tracing::debug!("PrefetchTree unavailable (errno {errno}); falling back to shallow per-dir prefetch");
       }
     }
@@ -584,6 +796,9 @@ pub struct NeedyFs {
   prefetcher: Prefetcher<FsRpcClient>,
   write_behind: WriteBehind<FsRpcClient>,
   dir_cache: Arc<DirCache>,
+  small_files: Arc<SmallFileCache>,
+  attr_cache: Arc<AttrCache>,
+  prefetch_gate: Arc<PrefetchGate>,
   local_locks: LocalLockTable,
 }
 
@@ -602,6 +817,9 @@ impl NeedyFs {
       prefetcher,
       write_behind,
       dir_cache: Arc::new(DirCache::new()),
+      small_files: Arc::new(SmallFileCache::new()),
+      attr_cache: Arc::new(AttrCache::new()),
+      prefetch_gate: Arc::new(PrefetchGate::new()),
       local_locks: LocalLockTable::default(),
     }
   }
@@ -620,6 +838,8 @@ impl NeedyFs {
       self.neg_cache.clear();
       self.prefetcher.clear().await;
       self.dir_cache.clear(&self.client).await;
+      self.small_files.clear().await;
+      self.attr_cache.clear().await;
     }
   }
 
@@ -682,7 +902,15 @@ fn proto_lock_type_to_posix(kind: i32) -> u32 {
 
 impl Filesystem for NeedyFs {
   async fn init(&self, _req: Request) -> FuseResult<ReplyInit> {
-    spawn_metadata_prefetch(Arc::clone(&self.client), Arc::clone(&self.dir_cache), self.config.case_insensitive, self.config.entry_ttl);
+    spawn_metadata_prefetch(
+      Arc::clone(&self.client),
+      Arc::clone(&self.dir_cache),
+      Arc::clone(&self.small_files),
+      Arc::clone(&self.attr_cache),
+      Arc::clone(&self.prefetch_gate),
+      self.config.case_insensitive,
+      self.config.entry_ttl,
+    );
     let mut reply = ReplyInit::new(NonZeroU32::new(MAX_WRITE_BYTES).expect("non-zero"));
     reply.max_background = Some(MAX_BACKGROUND_REQUESTS);
     reply.congestion_threshold = Some(CONGESTION_THRESHOLD);
@@ -690,13 +918,17 @@ impl Filesystem for NeedyFs {
   }
 
   async fn destroy(&self, _req: Request) {
+    self.prefetch_gate.finish();
     self.neg_cache.clear();
     self.prefetcher.clear().await;
     self.dir_cache.clear(&self.client).await;
+    self.small_files.clear().await;
+    self.attr_cache.clear().await;
   }
 
   async fn lookup(&self, _req: Request, parent: Inode, name: &OsStr) -> FuseResult<ReplyEntry> {
     self.sync_epoch().await;
+    self.prefetch_gate.wait_briefly().await;
     let name = os_str_to_string(name)?;
     if self.neg_cache.contains(parent, &name)
       || self.dir_cache.definitely_missing(parent, &name, self.config.case_insensitive, self.config.entry_ttl).await
@@ -716,6 +948,7 @@ impl Filesystem for NeedyFs {
     match self.client.lookup(parent, name.clone()).await {
       Ok(entry) => {
         let attr = entry.attr.ok_or_else(|| Errno::from(libc::EIO))?;
+        self.attr_cache.insert(attr.clone()).await;
         Ok(ReplyEntry {
           ttl: self.config.entry_ttl,
           attr: self.to_file_attr(&attr),
@@ -747,12 +980,23 @@ impl Filesystem for NeedyFs {
   }
 
   async fn getattr(&self, _req: Request, inode: Inode, fh: Option<u64>, _flags: u32) -> FuseResult<ReplyAttr> {
-    if let Some(fh) = fh
+    self.sync_epoch().await;
+    let remote_fh = fh.filter(|&h| !SmallFileCache::is_local_fh(h));
+    let mut flushed = false;
+    if let Some(fh) = remote_fh
       && self.write_behind.has_written(fh).await
     {
       self.write_behind.flush(fh).await.map_err(Errno::from)?;
+      flushed = true;
     }
-    let attr = self.client.getattr(inode, fh).await.map_err(Errno::from)?;
+    if !flushed && let Some(attr) = self.attr_cache.get(inode, self.config.attr_ttl).await {
+      return Ok(ReplyAttr {
+        ttl: self.config.attr_ttl,
+        attr: self.to_file_attr(&attr),
+      });
+    }
+    let attr = self.client.getattr(inode, remote_fh).await.map_err(Errno::from)?;
+    self.attr_cache.insert(attr.clone()).await;
     Ok(ReplyAttr {
       ttl: self.config.attr_ttl,
       attr: self.to_file_attr(&attr),
@@ -760,16 +1004,19 @@ impl Filesystem for NeedyFs {
   }
 
   async fn setattr(&self, _req: Request, inode: Inode, fh: Option<u64>, set_attr: SetAttr) -> FuseResult<ReplyAttr> {
+    let remote_fh = fh.filter(|&h| !SmallFileCache::is_local_fh(h));
+    self.attr_cache.invalidate(inode).await;
     if set_attr.size.is_some() {
-      if let Some(fh) = fh {
+      if let Some(fh) = remote_fh {
         self.write_behind.flush(fh).await.map_err(Errno::from)?;
       }
       self.prefetcher.invalidate_inode(inode).await;
+      self.small_files.invalidate(inode).await;
     }
 
     let req = FsSetAttr {
       ino: inode,
-      fh,
+      fh: remote_fh,
       mode: set_attr.mode,
       size: set_attr.size,
       atime_sec: set_attr.atime.map(|t| t.sec),
@@ -778,6 +1025,7 @@ impl Filesystem for NeedyFs {
       mtime_nsec: set_attr.mtime.map(|t| t.nsec),
     };
     let attr = self.client.setattr(req).await.map_err(Errno::from)?;
+    self.attr_cache.insert(attr.clone()).await;
     Ok(ReplyAttr {
       ttl: self.config.attr_ttl,
       attr: self.to_file_attr(&attr),
@@ -799,6 +1047,7 @@ impl Filesystem for NeedyFs {
     offset: u64,
     _lock_owner: u64,
   ) -> FuseResult<ReplyDirectoryPlus<impl Stream<Item = FuseResult<DirectoryEntryPlus>> + Send + 'a>> {
+    self.prefetch_gate.wait_briefly().await;
     let entries = self.load_dir_entries(parent, offset).await?;
     let entry_ttl = self.config.entry_ttl;
     let attr_ttl = self.config.attr_ttl;
@@ -832,6 +1081,21 @@ impl Filesystem for NeedyFs {
   }
 
   async fn open(&self, _req: Request, inode: Inode, flags: u32) -> FuseResult<ReplyOpen> {
+    self.sync_epoch().await;
+    let access_mode = (flags as libc::c_int) & libc::O_ACCMODE;
+    let is_readonly = access_mode == libc::O_RDONLY && ((flags as libc::c_int) & libc::O_TRUNC) == 0;
+    if is_readonly {
+      if let Some(local_fh) = self.small_files.try_open_readonly(inode, self.config.attr_ttl).await {
+        return Ok(ReplyOpen {
+          fh: local_fh,
+          flags: 0,
+        });
+      }
+    } else {
+      self.small_files.invalidate(inode).await;
+      self.attr_cache.invalidate(inode).await;
+    }
+
     let opened = self.client.open(inode, flags, self.config.writable).await.map_err(Errno::from)?;
     // NOTICE: `ReplyOpen.flags` carries FUSE kernel `FOPEN_*` flags
     // (Reference: Linux `include/uapi/linux/fuse.h`, `FOPEN_DIRECT_IO`..`FOPEN_PASSTHROUGH`),
@@ -846,6 +1110,10 @@ impl Filesystem for NeedyFs {
   }
 
   async fn read(&self, _req: Request, inode: Inode, fh: u64, offset: u64, size: u32) -> FuseResult<ReplyData> {
+    if SmallFileCache::is_local_fh(fh) {
+      let data = self.small_files.read(fh, offset, size).await.ok_or_else(|| Errno::from(libc::EBADF))?;
+      return Ok(ReplyData { data });
+    }
     self.sync_epoch().await;
     let data = self.prefetcher.read(inode, fh, offset, size).await.map_err(Errno::from)?;
     Ok(ReplyData { data })
@@ -862,11 +1130,19 @@ impl Filesystem for NeedyFs {
     _flags: u32,
   ) -> FuseResult<ReplyWrite> {
     self.prefetcher.invalidate_inode(inode).await;
+    self.small_files.invalidate(inode).await;
+    self.attr_cache.invalidate(inode).await;
     let written = self.write_behind.write(inode, fh, offset, data.to_vec()).await.map_err(Errno::from)?;
     Ok(ReplyWrite { written })
   }
 
   async fn flush(&self, _req: Request, inode: Inode, fh: u64, lock_owner: u64) -> FuseResult<()> {
+    if SmallFileCache::is_local_fh(fh) {
+      if self.config.lock_mode != FsLockMode::Remote {
+        self.local_locks.unlock_owner(inode, lock_owner);
+      }
+      return Ok(());
+    }
     let had_writes = self.write_behind.has_written(fh).await;
     self.write_behind.flush(fh).await.map_err(Errno::from)?;
     if self.config.lock_mode != FsLockMode::Remote {
@@ -881,15 +1157,35 @@ impl Filesystem for NeedyFs {
   }
 
   async fn fsync(&self, _req: Request, inode: Inode, fh: u64, datasync: bool) -> FuseResult<()> {
+    if SmallFileCache::is_local_fh(fh) {
+      return Ok(());
+    }
     self.write_behind.flush(fh).await.map_err(Errno::from)?;
     self.client.fsync(inode, fh, datasync).await.map_err(Errno::from)
   }
 
   async fn release(&self, _req: Request, inode: Inode, fh: u64, _flags: u32, lock_owner: u64, _flush: bool) -> FuseResult<()> {
+    if SmallFileCache::is_local_fh(fh) {
+      self.small_files.release(fh).await;
+      if self.config.lock_mode != FsLockMode::Remote {
+        self.local_locks.unlock_owner(inode, lock_owner);
+      }
+      return Ok(());
+    }
+    let had_writes = self.write_behind.has_written(fh).await;
     let wb_res = self.write_behind.release(fh).await;
     self.prefetcher.release_handle(fh).await;
     if self.config.lock_mode != FsLockMode::Remote {
       self.local_locks.unlock_owner(inode, lock_owner);
+    }
+    if !had_writes && self.config.lock_mode != FsLockMode::Remote {
+      // Read-only handles without remote locks do not need to stall `close(2)`
+      // on a WAN round trip; release the executor FD asynchronously.
+      let client = Arc::clone(&self.client);
+      tokio::spawn(async move {
+        let _ = client.release(inode, fh, lock_owner).await;
+      });
+      return wb_res.map_err(Errno::from);
     }
     let rel_res = self.client.release(inode, fh, lock_owner).await;
     wb_res.map_err(Errno::from)?;

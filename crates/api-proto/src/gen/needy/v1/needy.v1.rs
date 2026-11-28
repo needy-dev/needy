@@ -602,6 +602,13 @@ pub struct FsPrefetchTree {
     /// in their parent listing).
     #[prost(string, repeated, tag="4")]
     pub skip_names: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Maximum size in bytes of an individual file whose contents may be inlined
+    /// in the reply (0 disables content inlining).
+    #[prost(uint32, tag="5")]
+    pub max_inline_file_bytes: u32,
+    /// Maximum total bytes of inlined file content across the entire reply.
+    #[prost(uint32, tag="6")]
+    pub max_inline_total_bytes: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FsPrefetchDir {
@@ -610,10 +617,21 @@ pub struct FsPrefetchDir {
     #[prost(message, repeated, tag="2")]
     pub entries: ::prost::alloc::vec::Vec<FsDirEntry>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FsPrefetchFileData {
+    #[prost(uint64, tag="1")]
+    pub ino: u64,
+    #[prost(bytes="vec", tag="2")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FsPrefetchTreeReply {
     #[prost(message, repeated, tag="1")]
     pub dirs: ::prost::alloc::vec::Vec<FsPrefetchDir>,
+    /// Small read-only file contents inlined during the same walk so the client
+    /// can serve `open` + `read` + `release` with zero additional round trips.
+    #[prost(message, repeated, tag="2")]
+    pub files: ::prost::alloc::vec::Vec<FsPrefetchFileData>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SessionRequest {

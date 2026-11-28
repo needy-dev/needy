@@ -184,7 +184,9 @@ impl Server {
       caller,
     })
     .max_decoding_message_size(usize::MAX)
-    .max_encoding_message_size(usize::MAX);
+    .max_encoding_message_size(usize::MAX)
+    .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+    .send_compressed(tonic::codec::CompressionEncoding::Gzip);
     self.routes = self.routes.add_service(service);
     self.runners = Some(runners);
     self
@@ -215,8 +217,11 @@ impl Server {
 
   pub fn fs<F: Fs>(mut self, fs: Arc<F>) -> Self {
     let caller = self.caller.clone();
-    let service =
-      FsServiceServer::new(fs::Adapter { fs, caller }).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX);
+    let service = FsServiceServer::new(fs::Adapter { fs, caller })
+      .max_decoding_message_size(usize::MAX)
+      .max_encoding_message_size(usize::MAX)
+      .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+      .send_compressed(tonic::codec::CompressionEncoding::Gzip);
     self.routes = self.routes.add_service(service);
     self
   }

@@ -281,7 +281,11 @@ impl Client {
   }
 
   pub fn runners(&self) -> RunnerServiceClient<Service> {
-    RunnerServiceClient::new(self.service()).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX)
+    RunnerServiceClient::new(self.service())
+      .max_decoding_message_size(usize::MAX)
+      .max_encoding_message_size(usize::MAX)
+      .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+      .send_compressed(tonic::codec::CompressionEncoding::Gzip)
   }
 
   pub fn clients(&self) -> ClientServiceClient<Service> {
@@ -293,7 +297,11 @@ impl Client {
   }
 
   pub fn fs(&self) -> FsServiceClient<Service> {
-    FsServiceClient::new(self.service()).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX)
+    FsServiceClient::new(self.service())
+      .max_decoding_message_size(usize::MAX)
+      .max_encoding_message_size(usize::MAX)
+      .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+      .send_compressed(tonic::codec::CompressionEncoding::Gzip)
   }
 
   /// Opens a bidirectional `FsService.Session` stream, carrying this client's

@@ -810,6 +810,8 @@ fn dispatch_sync(inner: &HostFsInner, body: v1::session_request::Body) -> Result
       const MAX_DEPTH_CAP: usize = 8;
       const MAX_DIRS_CAP: usize = 4096;
       const MAX_TOTAL_ENTRIES: usize = 20_000;
+      const MAX_INLINE_FILE_CAP: usize = 64 * 1024;
+      const MAX_INLINE_TOTAL_CAP: usize = 8 * 1024 * 1024;
 
       let max_depth = (r.max_depth as usize).min(MAX_DEPTH_CAP);
       let max_dirs = if r.max_dirs == 0 {
@@ -817,13 +819,17 @@ fn dispatch_sync(inner: &HostFsInner, body: v1::session_request::Body) -> Result
       } else {
         (r.max_dirs as usize).min(MAX_DIRS_CAP)
       };
+      let max_inline_file = (r.max_inline_file_bytes as usize).min(MAX_INLINE_FILE_CAP);
+      let max_inline_total = (r.max_inline_total_bytes as usize).min(MAX_INLINE_TOTAL_CAP);
       let skip: std::collections::HashSet<&str> = r.skip_names.iter().map(String::as_str).collect();
       let mut queue = std::collections::VecDeque::new();
-      queue.push_back((r.ino, 0usize));
+      queue.push_back((r.ino, 0usize, String::new()));
 
       let mut dirs = Vec::new();
+      let mut files = Vec::new();
       let mut total_entries = 0usize;
-      while let Some((dir_ino, depth)) = queue.pop_front() {
+      let mut total_inline_bytes = 0usize;
+      while let Some((dir_ino, depth, rel_dir)) = queue.pop_front() {
         if dirs.len() >= max_dirs || total_entries >= MAX_TOTAL_ENTRIES {
           break;
         }
@@ -852,11 +858,57 @@ fn dispatch_sync(inner: &HostFsInner, body: v1::session_request::Body) -> Result
         if failed {
           continue;
         }
-        if depth < max_depth {
-          for entry in &all_entries {
-            let is_dir = entry.attr.as_ref().and_then(|a| v1::FsFileType::try_from(a.kind).ok()) == Some(v1::FsFileType::Directory);
-            if is_dir && entry.ino > ROOT_INO && !skip.contains(entry.name.as_str()) {
-              queue.push_back((entry.ino, depth + 1));
+        let in_git = rel_dir == ".git" || rel_dir.starts_with(".git/");
+        let in_agent_meta =
+          rel_dir == ".agents" || rel_dir.starts_with(".agents/") || rel_dir == ".claude" || rel_dir.starts_with(".claude/");
+
+        for entry in &all_entries {
+          let Some(attr) = entry.attr.as_ref() else {
+            continue;
+          };
+          let kind = v1::FsFileType::try_from(attr.kind).ok();
+          if kind == Some(v1::FsFileType::Directory) {
+            if depth < max_depth && entry.ino > ROOT_INO && !skip.contains(entry.name.as_str()) {
+              let skip_git_sub = in_git && matches!(entry.name.as_str(), "objects" | "logs" | "hooks" | "worktrees" | "modules");
+              if !skip_git_sub {
+                let child_rel = if rel_dir.is_empty() {
+                  entry.name.clone()
+                } else {
+                  format!("{rel_dir}/{}", entry.name)
+                };
+                queue.push_back((entry.ino, depth + 1, child_rel));
+              }
+            }
+          } else if kind == Some(v1::FsFileType::Regular) && max_inline_file > 0 {
+            let size = attr.size as usize;
+            let want_inline = in_agent_meta
+              || (in_git && matches!(entry.name.as_str(), "HEAD" | "config" | "packed-refs" | "commondir"))
+              || matches!(
+                entry.name.as_str(),
+                "SKILL.md"
+                  | "CLAUDE.md"
+                  | "AGENTS.md"
+                  | "package.json"
+                  | "Cargo.toml"
+                  | "tsconfig.json"
+                  | ".gitignore"
+                  | "settings.json"
+                  | "settings.local.json"
+              );
+            if want_inline
+              && size <= max_inline_file
+              && total_inline_bytes.saturating_add(size) <= max_inline_total
+              && let Ok((fh, _)) = b.open_file(entry.ino, linux_flags::O_RDONLY, false)
+            {
+              let read_res = b.read(entry.ino, fh, 0, size);
+              let _ = b.release(entry.ino, fh, 0);
+              if let Ok((data, _)) = read_res {
+                total_inline_bytes += data.len();
+                files.push(v1::FsPrefetchFileData {
+                  ino: entry.ino,
+                  data,
+                });
+              }
             }
           }
         }
@@ -866,7 +918,7 @@ fn dispatch_sync(inner: &HostFsInner, body: v1::session_request::Body) -> Result
           entries: all_entries,
         });
       }
-      Ok(Resp::PrefetchTree(v1::FsPrefetchTreeReply { dirs }))
+      Ok(Resp::PrefetchTree(v1::FsPrefetchTreeReply { dirs, files }))
     }
   }
 }

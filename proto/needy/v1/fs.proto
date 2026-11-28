@@ -328,6 +328,11 @@ message FsPrefetchTree {
   // Directory names omitted from recursive descent (still returned as entries
   // in their parent listing).
   repeated string skip_names = 4;
+  // Maximum size in bytes of an individual file whose contents may be inlined
+  // in the reply (0 disables content inlining).
+  uint32 max_inline_file_bytes = 5;
+  // Maximum total bytes of inlined file content across the entire reply.
+  uint32 max_inline_total_bytes = 6;
 }
 
 message FsPrefetchDir {
@@ -335,8 +340,16 @@ message FsPrefetchDir {
   repeated FsDirEntry entries = 2;
 }
 
+message FsPrefetchFileData {
+  uint64 ino = 1;
+  bytes data = 2;
+}
+
 message FsPrefetchTreeReply {
   repeated FsPrefetchDir dirs = 1;
+  // Small read-only file contents inlined during the same walk so the client
+  // can serve `open` + `read` + `release` with zero additional round trips.
+  repeated FsPrefetchFileData files = 2;
 }
 
 message SessionRequest {

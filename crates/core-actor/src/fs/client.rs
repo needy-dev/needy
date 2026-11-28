@@ -316,13 +316,16 @@ impl FsRpcClient {
     }
   }
 
-  /// Prefetches a bounded BFS subtree of directory listings in one RPC.
+  /// Prefetches a bounded BFS subtree of directory listings (and optional
+  /// inlined small read-only file contents) in one RPC.
   pub async fn prefetch_tree(
     &self,
     ino: u64,
     max_depth: u32,
     max_dirs: u32,
     skip_names: Vec<String>,
+    max_inline_file_bytes: u32,
+    max_inline_total_bytes: u32,
   ) -> Result<needy_api_proto::v1::FsPrefetchTreeReply, i32> {
     match self
       .call(session_request::Body::PrefetchTree(needy_api_proto::v1::FsPrefetchTree {
@@ -330,6 +333,8 @@ impl FsRpcClient {
         max_depth,
         max_dirs,
         skip_names,
+        max_inline_file_bytes,
+        max_inline_total_bytes,
       }))
       .await?
     {
