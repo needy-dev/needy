@@ -96,7 +96,11 @@ Every binding carries the same message, `Frame`:
   returns (stream SessionResponse); }`, where each message wraps one `Frame`
   (`frame = 1`). The wrapper satisfies Buf's STANDARD lint and adds nothing
   else;
-- **WebSocket:** one binary message per `Frame`, at most 1 MiB;
+- **WebSocket:** each binary message carries one or more frames, each
+  after a big-endian `uint32` length, as on stdio. A sender batches small
+  frames (a burst of `FsResponse`s, say) into one message, because a relay
+  pays per message. A frame never spans two messages, and a message is at
+  most the receiver's frame limit (§4) plus 4 bytes per frame it carries;
 - **stdio:** a big-endian `uint32` length, then one `Frame`.
 
 A peer that speaks any binding speaks all of the protocol. A device agent
@@ -153,18 +157,38 @@ message Frame {
     intersection) and the server's implementation, plus the server's `TERM`
     grace period (§5) and, with `exec.hold`, how long it holds a process and
     how many output bytes it keeps.
+  - Each side states `max_frame_bytes`, the largest encoded `Frame` it
+    accepts. It is at least 1 MiB, which is also the value when it is 0.
+    A peer never sends a frame larger than the other side's limit; a larger
+    one is a protocol error that ends the session with `invalid`.
   - A server with no common major version answers with `Close` and a reason.
 - **Streams:**
   - Odd stream IDs are opened by the client and even ones by the server
     (reserved: the server opens none in v1).
   - Within a stream, frames are ordered. Across streams, nothing is ordered.
 - **Flow control:**
-  - Each stream has a byte credit in each direction, 256 KiB to start.
-  - Data frames count their payload against it, and the receiver returns
-    `Credit` as it consumes.
+  - Each stream has a byte credit in each direction, 256 KiB to start, and
+    the session has one more, 1 MiB to start, that all streams share. A
+    `Credit` on stream 0 grants session credit; on any other stream, that
+    stream's.
+  - Data counts against both: `stdin`, `stdout` and `stderr` bytes on an
+    exec stream, and the encoded size of each `FsRequest` and `FsResponse`
+    on a file stream. The receiver returns `Credit` as it consumes. Control
+    frames (`Open`, `Credit`, `Close`, `Ping`, `Pong`) are not counted.
+  - A receiver may grant more than it was granted at the start, to fit the
+    path's bandwidth-delay product: it measures the round trip with `Ping`
+    and grows a window that is used up within one round trip, as HTTP/2
+    and QUIC receivers do. It never takes back credit it has granted. A
+    sender that exceeds its credit ends the session with `invalid`.
   - Credits are end to end, so a relay keeps no flow state and one slow stream
     cannot block another. That is the head-of-line problem Konnectivity hit
-    (apiserver-network-proxy #881).
+    (apiserver-network-proxy #881). The session credit bounds what one
+    session can leave queued in a relay.
+  - NOTICE: needy's own gRPC runs with 16 MiB stream and 32 MiB
+    connection windows on HTTP/2 (`crates/api-client/src/lib.rs`,
+    `crates/api-server/src/server.rs`, v0.0.26), because a 256 KiB window
+    caps a 100 ms path near 2.5 MiB/s. Boxide starts small
+    for relays and grows by measurement instead of fixing large windows.
 - **Liveness:** `Ping` every 15 s. Three missed `Pong`s end the session.
   Bindings may add their own keepalive.
 - **Errors:** `StreamClose.code` uses a closed set of codes (`ok`, `cancelled`,
@@ -241,6 +265,44 @@ The first response, `FsMounted`, returns the root inode and the file
 capabilities granted for this mount. All later requests on the stream name inodes and
 handles from that mount and carry a request `id`, so many can be in flight.
 
+`FsMounted.max_io_bytes` is the largest `Read.size` and `Write.data` the
+server accepts on the mount, chosen so the reply fits the client's frame
+limit (§4). A client splits a larger read or write into several requests
+in flight at once. A server answers a `Read` with every byte asked for
+unless the file ends first, so a client never takes a short read for the
+end of the file.
+
+Optional capability **`fs.resume`**:
+
+- `FsMounted` returns a `resume` token and `resume_ms`. When the stream or
+  the session drops, the server keeps the mount's inodes, open handles and
+  locks for `resume_ms`.
+- A client that reconnects opens `FsMount{resume: token}`. The server
+  answers `FsMounted{resumed: true}` with the same root and generation, and
+  every inode and handle the client holds is still valid. If the token has
+  expired or is unknown, it answers with a new mount and `resumed: false`.
+- After a resume the client re-sends what was unanswered at the drop when
+  repeating it is harmless: `Lookup`, `GetAttr`, `ReadDirPlus`,
+  `ReadLink`, `StatFs`, `Read`, `Write` (explicit offsets), `Flush`,
+  `Fsync`, `GetLock`, and `Release` (a server answers `EBADF` for a handle
+  it already released, and the client takes that as done). Every other
+  operation that was unanswered fails to its caller with `EIO`, because
+  its outcome is unknown. `Forget` is never re-sent: a lost one only keeps an
+  inode alive until the mount ends.
+- Without `fs.resume`, or when a resume fails, every inode and handle of
+  the old mount is gone. A client answers operations on them with `ESTALE`
+  or looks the paths it knows up again on the new mount; the protocol
+  promises no identity across mounts.
+- TODO(boxide-resume-replay): a server-side log of finished replies, so a
+  re-sent non-idempotent request is answered instead of failing with `EIO`,
+  is left out of v1. It would make a server keep replies it cannot know were
+  delivered. Revisit when a client shows the `EIO`s matter in practice.
+- NOTICE: needy's own file client re-sends only `FsMount` after a
+  reconnect, and the server gives out fresh inode numbers, so inodes cached
+  from before it are not remapped (`TODO(fs-reconnect-inodes)` in
+  `crates/core-actor/src/fs/fuse.rs`, v0.0.26). `fs.resume` is what lets a
+  Boxide client avoid that.
+
 ### 6.2 Operations
 
 | Core (every file server) | Optional capability |
@@ -249,7 +311,8 @@ handles from that mount and carry a request `id`, so many can be in flight.
 | `ReadDirPlus` (entries with attributes, paged) | `fs.locks` (`GetLock`, `SetLock`, by owner) |
 | `Open`, `Read{handle, offset, size}`, `Write{handle, offset, bytes}`, `Flush`, `Fsync`, `Release` | `fs.compound` (`CreateAndWrite`, `ReadWhole`) |
 | `Create`, `Mkdir`, `Unlink`, `Rmdir`, `Rename{flags}`, `StatFs` | `fs.symlink` (`Symlink`, `ReadLink`); `fs.symlink-dangling` (to a missing target) |
-| | `fs.prefetch-tree` (`FsPrefetchTree`: directory listings several levels deep in one round trip) |
+| | `fs.prefetch-tree` (`FsPrefetchTree`: directory listings several levels deep in one round trip; a reply that would pass the frame limit stops early and lists the directories it did not visit in `unvisited`) |
+| | `fs.resume` (§6.1) |
 | | `fs.strict-root`, `fs.mode-bits`, `fs.ownership`, `fs.case-sensitive`, `fs.unlink-open`, `fs.rename-replace-open` (§7) |
 
 Rules:
@@ -263,9 +326,9 @@ Rules:
   This is the scheme WSL and Cygwin use, so files stay readable to both. A
   name it cannot map (`CON`, `NUL`, `COM1` …) is `EINVAL`, never `ENOENT`.
 - **Errors are Linux errno numbers**, whatever the server's OS, for example
-  `EPERM` 1, `ENOENT` 2, `EACCES` 13, `EBUSY` 16 (a sharing violation),
+  `EPERM` 1, `ENOENT` 2, `EIO` 5, `EBADF` 9, `EACCES` 13, `EBUSY` 16 (a sharing violation),
   `EEXIST` 17, `EXDEV` 18, `EINVAL` 22, `ENOSPC` 28, `EROFS` 30,
-  `ENOSYS` 38, `ENOTEMPTY` 39, `ELOOP` 40, `EOPNOTSUPP` 95. The numbers
+  `ENOSYS` 38, `ENOTEMPTY` 39, `ELOOP` 40, `EOPNOTSUPP` 95, `ESTALE` 116. The numbers
   are fixed by this spec, not taken from the host.
 - **Attributes report what is true.** `SetAttr` applies what the host
   supports and its reply carries the resulting attributes. Without
@@ -286,6 +349,10 @@ Rules:
   best effort by not granting the capability.
 - **Caching:** attributes carry a validity hint (a TTL) that clients may use.
   The protocol promises nothing about changes made on the host beyond it.
+- **Paging:** `ReadDirPlus` returns fewer than `max_entries` entries, with
+  `eof` unset, when more would not fit a frame. `FsPrefetchTree` lists whole
+  directories only and returns the inodes it reached but did not list in
+  `unvisited`, so a client continues from them.
 
 ## 7. Capabilities
 
@@ -297,6 +364,7 @@ Rules:
 | `exec.pgroup` | signals reach the command's whole process group |
 | `exec.signals.posix` | every POSIX signal is delivered as itself (§5 table otherwise) |
 | `fs.link`, `fs.locks`, `fs.compound`, `fs.prefetch-tree`, `fs.strict-root` | §6.2 |
+| `fs.resume` | a mount survives a dropped stream (§6.1) |
 | `fs.symlink`, `fs.symlink-dangling` | symlinks; symlinks to missing targets (Windows fixes a link's file or directory type when it is created) |
 | `fs.mode-bits`, `fs.ownership` | all permission bits; uid and gid |
 | `fs.case-sensitive` | names differing only in case are different files (mount-wide in v1) |
@@ -387,3 +455,8 @@ free of them.
    lost ranges with `Gap`; no server-side snapshot in v1 (§5). Previously:
    whether `exec.hold`'s snapshot is a terminal repaint (`Snapshot` bytes) or
    left to the client.
+6. *Decided 2026-11-28 (owner):* what needy's file service learned
+   (v0.0.24 to v0.0.26) goes into v1: a frame limit each side states, with
+   reads, writes and listings split to fit (§4, §6.1, §6.2); a session
+   credit next to stream credits, and windows that grow by measurement
+   (§4); several frames per WebSocket message (§3); and `fs.resume` (§6.1).
