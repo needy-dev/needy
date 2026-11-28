@@ -40,9 +40,7 @@ enum Command {
   #[command(hide = true)]
   ExecutionHolder {
     #[arg(long)]
-    startup_stdin: bool,
-    #[arg(long)]
-    directory: PathBuf,
+    startup_file: PathBuf,
   },
   /// Execute through a run's routing and bound executors.
   Exec(super::proc::exec::RunArgs),
@@ -281,10 +279,7 @@ fn actor_state(value: i32) -> Result<Option<ActorState>> {
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let fail = needy_api_client::Error::from;
   match args.command {
-    Command::ExecutionHolder {
-      startup_stdin,
-      directory,
-    } => return execution::serve(startup_stdin, &directory).await,
+    Command::ExecutionHolder { startup_file } => return execution::serve(&startup_file).await,
     Command::Exec(args) => return super::proc::exec::run_in_run(args, ctx).await,
     Command::Report(args) => return report::run(args, ctx).await,
     Command::Chaos(args) => return chaos::run(args, ctx).await,

@@ -4,13 +4,17 @@
 use crate::{cli::Context, connection::Resolved};
 use anyhow::{Context as _, Result};
 use needy_api_client::Client;
+#[cfg(unix)]
 use needy_api_client::proto::v1::PrepareClientExecutionRequest;
+#[cfg(unix)]
 use needy_api_server::control::RunnerHost;
+#[cfg(unix)]
 use needy_api_server::protocol::domain::proto_runner_host;
 use needy_daemon::runner::ClientExecutionConfig;
-use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 
 pub(super) struct Holder {
   pub capability: String,
@@ -22,7 +26,7 @@ pub(super) struct Holder {
 impl Holder {
   pub fn keep(&mut self) {
     // std::process::Child has no kill-on-drop. The holder now belongs to the
-    // invocation; its runtime directory is reclaimed by the child.
+    // invocation; its protected startup directory is reclaimed by the child.
     // Transfer wait ownership independently of the CLI's attach lifetime.
     // Keeping work alive must not leave an exited child without a waiter.
     if let Some(mut child) = self.child.take() {
@@ -52,11 +56,12 @@ impl Drop for Holder {
     if let Err(error) = std::fs::remove_dir_all(&self.directory)
       && error.kind() != std::io::ErrorKind::NotFound
     {
-      tracing::warn!("cannot remove failed holder runtime directory: {error}");
+      tracing::warn!("cannot remove failed holder startup directory: {error}");
     }
   }
 }
 
+#[cfg(unix)]
 pub(super) async fn launch(ctx: &Context, selection: &Resolved, client: &Client) -> Result<Holder> {
   let reserved = client
     .runs()
@@ -92,14 +97,18 @@ pub(super) async fn launch(ctx: &Context, selection: &Resolved, client: &Client)
     run: reserved.run_id,
     directory: directory.clone(),
   };
-  let payload = serde_json::to_vec(&config)?;
+  let startup = directory.join("startup.json");
+  let mut options = std::fs::OpenOptions::new();
+  options.write(true).create_new(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    options.mode(0o600);
+  }
+  use std::io::Write as _;
+  options.open(&startup)?.write_all(&serde_json::to_vec(&config)?)?;
   let mut command = Command::new(std::env::current_exe().context("cannot locate needy for client execution")?);
-  command
-    .args(["run", "execution-holder", "--startup-stdin", "--directory"])
-    .arg(&directory)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null());
+  command.args(["run", "execution-holder", "--startup-file"]).arg(&startup).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
   #[cfg(unix)]
   {
     use std::os::unix::process::CommandExt as _;
@@ -113,35 +122,18 @@ pub(super) async fn launch(ctx: &Context, selection: &Resolved, client: &Client)
       });
     }
   }
-  #[cfg(windows)]
-  {
-    use std::os::windows::process::CommandExt as _;
-    // Reference: https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags
-    // DETACHED_PROCESS (0x0000_0008) | CREATE_NEW_PROCESS_GROUP (0x0000_0200)
-    // Detach the holder from the creating console so Ctrl-C / detach / terminal
-    // close does not terminate the bound client execution helper.
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-  }
-  let mut child = command.spawn().context("cannot launch this account's client execution holder")?;
-  // Deliver the startup capability and headers exclusively over the anonymous
-  // stdin pipe so no secret touches the filesystem or process environment.
-  let mut stdin = child.stdin.take().context("client execution holder stdin pipe missing")?;
-  let write_result = stdin.write_all(&payload);
-  drop(stdin);
-  holder.child = Some(child);
-  write_result.context("cannot send startup configuration to client execution holder")?;
+  holder.child = Some(command.spawn().context("cannot launch this account's client execution holder")?);
   Ok(holder)
 }
 
-pub(super) async fn serve(startup_stdin: bool, directory: &Path) -> Result<i32> {
-  anyhow::ensure!(startup_stdin, "execution-holder requires --startup-stdin");
-  let mut bytes = Vec::new();
-  std::io::stdin().read_to_end(&mut bytes).context("cannot read holder startup from stdin")?;
-  let config: ClientExecutionConfig = serde_json::from_slice(&bytes).context("cannot parse holder startup")?;
-  let expected = directory.canonicalize().context("cannot resolve holder runtime directory")?;
-  anyhow::ensure!(expected == config.directory, "holder runtime directory does not match startup configuration");
+pub(super) async fn serve(path: &Path) -> Result<i32> {
+  let config: ClientExecutionConfig =
+    serde_json::from_str(&crate::configuration::read_secret(path).context("cannot read private holder startup")?)?;
+  let parent = path.parent().context("holder startup has no directory")?.canonicalize()?;
+  anyhow::ensure!(parent == config.directory, "holder startup directory does not match its protected parent");
+  // Consume the startup secret before accepting work. The capability thereafter
+  // lives only in the holder process and in the daemon as a hash.
+  std::fs::remove_file(path).context("cannot remove consumed holder startup")?;
   let directory = config.directory.clone();
   let served = needy_daemon::runner::serve_client_execution(config).await;
   if let Err(error) = std::fs::remove_dir_all(&directory)
@@ -151,4 +143,12 @@ pub(super) async fn serve(startup_stdin: bool, directory: &Path) -> Result<i32> 
   }
   served?;
   Ok(0)
+}
+
+// TODO(windows-client-execution): protected credential/config ACL handling is
+// outside this slice; enable automatic holders after canonical client admission
+// can validate and create same-account private startup files on Windows.
+#[cfg(not(unix))]
+pub(super) async fn launch(_ctx: &Context, _selection: &Resolved, _client: &Client) -> Result<Holder> {
+  anyhow::bail!("automatic client execution requires private startup-file support on this platform")
 }
